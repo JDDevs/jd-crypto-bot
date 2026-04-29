@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 CONFIDENCE_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 
 SYSTEM_PROMPT = """You are an expert quantitative crypto trader with deep knowledge of technical analysis.
-You analyze market data and make precise trading decisions.
+You analyze market data and make precise trading decisions, learning from your past trades.
 You must respond ONLY with a valid JSON object, no extra text."""
 
 _USER_TEMPLATE = """Analyze the following market data for {symbol} on the {timeframe} timeframe and decide whether to BUY, SELL, or HOLD.
@@ -28,18 +28,33 @@ _USER_TEMPLATE = """Analyze the following market data for {symbol} on the {timef
 ```
 {candles_table}
 ```
-
+{memory_section}
 ## Your Task
-Based on the data above, provide your trading decision.
+Based on the data above (and your past experience if shown), provide your trading decision.
 
 Rules:
 - BUY only when there is a clear bullish signal with good risk/reward
 - SELL only when there is a clear bearish reversal or exit signal
 - HOLD when the signal is weak or the market is uncertain
 - Never trade against a strong trend
+- Apply the lessons you've learned from past trades when relevant
 
 Respond ONLY with this JSON (no markdown, no extra text):
 {{"decision": "BUY|SELL|HOLD", "confidence": "LOW|MEDIUM|HIGH", "reasoning": "one concise sentence"}}"""
+
+
+REFLECTION_PROMPT = """You previously analyzed {symbol} and decided to BUY at {entry_price:.4f}.
+
+Your reasoning at the time was:
+"{entry_reasoning}"
+
+The trade closed at {exit_price:.4f} with PnL={pnl:+.4f} USDT (reason: {exit_reason}).
+
+In ONE concise sentence (max 25 words), what's a specific, actionable lesson for similar setups
+in the future? Focus on what to look for or avoid based on this outcome.
+
+Respond ONLY with this JSON (no markdown, no extra text):
+{{"lesson": "..."}}"""
 
 
 @dataclass
@@ -52,9 +67,52 @@ class AISignal:
         return f"AI={self.signal.value} | Confidence={self.confidence} | {self.reasoning}"
 
 
-def _build_prompt(df: pd.DataFrame, symbol: str) -> str:
-    df = compute_indicators(df)
-    df = df.dropna()
+# ---------------------------------------------------------------------------
+# Memory-aware prompt building
+# ---------------------------------------------------------------------------
+
+def _build_memory_section(pair_state: dict | None) -> str:
+    """Returns extra prompt sections with the AI's track record + lessons."""
+    if not pair_state:
+        return ""
+
+    parts: list[str] = []
+
+    stats = pair_state.get("stats", {})
+    wins = stats.get("wins", 0)
+    losses = stats.get("losses", 0)
+    pnl = stats.get("total_pnl", 0.0)
+    total = wins + losses
+    if total > 0:
+        win_rate = (wins / total) * 100
+        parts.append(
+            f"\n## Your Track Record on This Pair\n"
+            f"- {total} trades closed | Win rate: {win_rate:.0f}% ({wins}W/{losses}L)\n"
+            f"- Cumulative PnL: {pnl:+.4f} USDT"
+        )
+
+    closed = pair_state.get("closed_trades", [])
+    if closed:
+        last_n = closed[-5:]
+        lines = []
+        for t in reversed(last_n):
+            lines.append(
+                f"- BUY @ {t['entry_price']:.4f} → SELL @ {t['exit_price']:.4f} "
+                f"({t['pnl']:+.4f} USDT, {t['exit_reason']}) — entry rationale: \"{t['entry_reasoning']}\""
+            )
+        parts.append("\n## Last Closed Trades (most recent first)\n" + "\n".join(lines))
+
+    lessons = pair_state.get("lessons_learned", [])
+    if lessons:
+        last_lessons = lessons[-8:]
+        lines = [f"- {l['lesson']}" for l in last_lessons]
+        parts.append("\n## Lessons You've Learned (apply when relevant)\n" + "\n".join(lines))
+
+    return "\n".join(parts) + ("\n" if parts else "")
+
+
+def _build_prompt(df: pd.DataFrame, symbol: str, pair_state: dict | None = None) -> str:
+    df = compute_indicators(df).dropna()
     last = df.iloc[-1]
 
     ema_fast_val = last["ema_fast"]
@@ -83,12 +141,12 @@ def _build_prompt(df: pd.DataFrame, symbol: str) -> str:
         rsi_state=rsi_state,
         volume=last["volume"],
         candles_table=candles_table,
+        memory_section=_build_memory_section(pair_state),
     )
 
 
 def _parse_response(content: str) -> AISignal:
     content = content.strip()
-    # Strip markdown code fences if present
     if content.startswith("```"):
         content = content.split("```")[1]
         if content.startswith("json"):
@@ -102,9 +160,13 @@ def _parse_response(content: str) -> AISignal:
     return AISignal(signal, confidence, reasoning)
 
 
-def analyse(df: pd.DataFrame, symbol: str) -> AISignal:
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def analyse(df: pd.DataFrame, symbol: str, pair_state: dict | None = None) -> AISignal:
     client = Groq(api_key=GROQ_API_KEY)
-    prompt = _build_prompt(df, symbol)
+    prompt = _build_prompt(df, symbol, pair_state)
 
     log.debug("Sending market data for %s to Groq (%s)...", symbol, GROQ_MODEL)
     response = client.chat.completions.create(
@@ -113,7 +175,7 @@ def analyse(df: pd.DataFrame, symbol: str) -> AISignal:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.2,   # low temp = more deterministic decisions
+        temperature=0.2,
         max_tokens=150,
     )
 
@@ -125,6 +187,47 @@ def analyse(df: pd.DataFrame, symbol: str) -> AISignal:
     return ai_signal
 
 
+def reflect(symbol: str, closed_trade: dict) -> str:
+    """
+    Ask Groq to extract a one-sentence lesson from a closed trade.
+    Returns the lesson string (empty if it failed).
+    """
+    if not closed_trade.get("entry_reasoning"):
+        return ""
+
+    client = Groq(api_key=GROQ_API_KEY)
+    prompt = REFLECTION_PROMPT.format(
+        symbol=symbol,
+        entry_price=closed_trade["entry_price"],
+        entry_reasoning=closed_trade["entry_reasoning"],
+        exit_price=closed_trade["exit_price"],
+        pnl=closed_trade["pnl"],
+        exit_reason=closed_trade["exit_reason"],
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_tokens=100,
+        )
+        content = response.choices[0].message.content.strip()
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        data = json.loads(content.strip())
+        lesson = data.get("lesson", "").strip()
+        log.info("[REFLECT %s] %s", symbol, lesson)
+        return lesson
+    except Exception as e:
+        log.warning("[REFLECT %s] Failed: %s", symbol, e)
+        return ""
+
+
 def is_actionable(ai_signal: AISignal) -> bool:
-    """Returns True if AI confidence meets or exceeds the configured threshold."""
     return CONFIDENCE_RANK.get(ai_signal.confidence, 0) >= CONFIDENCE_RANK.get(AI_CONFIDENCE_THRESHOLD, 1)

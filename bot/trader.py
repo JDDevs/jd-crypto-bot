@@ -8,7 +8,7 @@ from bot.exchange import (
     place_market_order,
 )
 from bot.strategy import Signal
-from bot.ai_analyst import analyse, is_actionable
+from bot.ai_analyst import analyse, reflect, is_actionable
 from bot.risk import build_trade_setup, should_exit, TradeSetup
 from bot import state as state_mod
 
@@ -72,7 +72,7 @@ class Trader:
             self._manage_open_trade(symbol, df)
             return
 
-        ai = analyse(df, symbol)
+        ai = analyse(df, symbol, pair_state)
         state_mod.record_ai_signal(self.state, symbol, ai.signal.value, ai.confidence, ai.reasoning)
         state_mod.save(self.state)
 
@@ -109,7 +109,7 @@ class Trader:
             return
 
         # AI early-exit check
-        ai = analyse(df, symbol)
+        ai = analyse(df, symbol, self.state["pairs"][symbol])
         state_mod.record_ai_signal(self.state, symbol, ai.signal.value, ai.confidence, ai.reasoning)
         state_mod.save(self.state)
 
@@ -126,7 +126,7 @@ class Trader:
         place_market_order(self.exchange, symbol, "sell", setup.quantity)
 
         pnl = (price - setup.entry_price) * setup.quantity
-        state_mod.record_close(self.state, symbol, price, setup.quantity, pnl, reason)
+        closed = state_mod.record_close(self.state, symbol, price, setup.quantity, pnl, reason)
         state_mod.save(self.state)
 
         stats = self.state["pairs"][symbol]["stats"]
@@ -135,3 +135,9 @@ class Trader:
             symbol, pnl, stats["wins"], stats["losses"], stats["total_pnl"],
             state_mod.total_pnl(self.state),
         )
+
+        # Self-reflection: ask Groq for a lesson learned
+        lesson = reflect(symbol, closed)
+        if lesson:
+            state_mod.record_lesson(self.state, symbol, lesson)
+            state_mod.save(self.state)

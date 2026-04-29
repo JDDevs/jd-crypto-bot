@@ -46,11 +46,15 @@ def ensure_pair(state: dict[str, Any], symbol: str) -> dict[str, Any]:
             "last_ai_signal": None,
             "price_history": [],
             "equity_history": [],
+            "closed_trades": [],
+            "lessons_learned": [],
         }
     else:
         # Backfill keys for older state files
         state["pairs"][symbol].setdefault("price_history", [])
         state["pairs"][symbol].setdefault("equity_history", [])
+        state["pairs"][symbol].setdefault("closed_trades", [])
+        state["pairs"][symbol].setdefault("lessons_learned", [])
     return state["pairs"][symbol]
 
 
@@ -83,12 +87,13 @@ def record_ai_signal(state: dict[str, Any], symbol: str,
 def record_open(state: dict[str, Any], symbol: str, setup: Any, reasoning: str) -> None:
     pair = ensure_pair(state, symbol)
     pair["open_trade"] = {
-        "entry_price": setup.entry_price,
-        "take_profit": setup.take_profit,
-        "stop_loss":   setup.stop_loss,
-        "quantity":    setup.quantity,
-        "risk_amount": setup.risk_amount,
-        "opened_at":   _now(),
+        "entry_price":     setup.entry_price,
+        "take_profit":     setup.take_profit,
+        "stop_loss":       setup.stop_loss,
+        "quantity":        setup.quantity,
+        "risk_amount":     setup.risk_amount,
+        "opened_at":       _now(),
+        "entry_reasoning": reasoning,
     }
     state["trade_history"].append({
         "timestamp": _now(),
@@ -102,19 +107,37 @@ def record_open(state: dict[str, Any], symbol: str, setup: Any, reasoning: str) 
 
 
 def record_close(state: dict[str, Any], symbol: str, price: float,
-                 quantity: float, pnl: float, reason: str) -> None:
+                 quantity: float, pnl: float, reason: str) -> dict[str, Any]:
+    """Returns a dict describing the closed trade (used by reflect())."""
     pair = ensure_pair(state, symbol)
+    open_trade = pair.get("open_trade") or {}
+    closed = {
+        "entry_price":     open_trade.get("entry_price"),
+        "exit_price":      price,
+        "quantity":        quantity,
+        "pnl":             round(pnl, 6),
+        "exit_reason":     reason,
+        "entry_reasoning": open_trade.get("entry_reasoning", ""),
+        "opened_at":       open_trade.get("opened_at"),
+        "closed_at":       _now(),
+    }
+
     pair["open_trade"] = None
     if pnl > 0:
         pair["stats"]["wins"] += 1
     else:
         pair["stats"]["losses"] += 1
     pair["stats"]["total_pnl"] = round(pair["stats"]["total_pnl"] + pnl, 6)
+
     pair.setdefault("equity_history", []).append({
         "t": _now(),
         "v": pair["stats"]["total_pnl"],
     })
     pair["equity_history"] = pair["equity_history"][-200:]
+
+    pair.setdefault("closed_trades", []).append(closed)
+    pair["closed_trades"] = pair["closed_trades"][-20:]
+
     state["trade_history"].append({
         "timestamp": _now(),
         "symbol":    symbol,
@@ -124,8 +147,20 @@ def record_close(state: dict[str, Any], symbol: str, price: float,
         "reason":    reason,
         "pnl":       round(pnl, 6),
     })
-    # Cap history length to avoid unbounded growth
     state["trade_history"] = state["trade_history"][-500:]
+    return closed
+
+
+def record_lesson(state: dict[str, Any], symbol: str, lesson: str, max_lessons: int = 10) -> None:
+    pair = ensure_pair(state, symbol)
+    lesson = lesson.strip()
+    if not lesson:
+        return
+    pair.setdefault("lessons_learned", []).append({
+        "t": _now(),
+        "lesson": lesson,
+    })
+    pair["lessons_learned"] = pair["lessons_learned"][-max_lessons:]
 
 
 def total_pnl(state: dict[str, Any]) -> float:

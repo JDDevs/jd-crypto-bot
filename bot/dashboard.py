@@ -50,6 +50,10 @@ _PAGE = """
   .footer { margin-top: 32px; color:#475569; font-size:12px; }
   .chart-box { height:140px; margin: 12px 0 8px 0; }
   .equity-box { height: 280px; background:#1e293b; border-radius:8px; padding:16px; }
+  .lessons { margin-top:12px; background:#0f172a; border-left:3px solid #a855f7; padding:8px 12px; border-radius:4px; }
+  .lessons h4 { margin: 0 0 6px 0; font-size: 12px; color:#a855f7; text-transform: uppercase; letter-spacing:.5px; }
+  .lessons ul { margin:0; padding-left:18px; font-size: 12px; color:#cbd5e1; }
+  .lessons li { margin: 3px 0; line-height: 1.4; }
 </style>
 </head>
 <body>
@@ -119,6 +123,17 @@ _PAGE = """
         <span class="value {{ 'pos' if p.stats.total_pnl > 0 else ('neg' if p.stats.total_pnl < 0 else 'neu') }}">
           {{ '%+.4f'|format(p.stats.total_pnl) }} USDT
         </span></div>
+
+      {% if p.lessons_learned %}
+      <div class="lessons">
+        <h4>Lecciones aprendidas</h4>
+        <ul>
+          {% for l in p.lessons_learned[-5:]|reverse %}
+            <li>{{ l.lesson }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
     </div>
   {% endfor %}
   </div>
