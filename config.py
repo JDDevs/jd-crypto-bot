@@ -31,3 +31,8 @@ CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "100"))
 
 # Loop interval (seconds) — should match the timeframe approximately
 LOOP_SLEEP = int(os.getenv("LOOP_SLEEP", "30"))
+
+# Groq AI
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+AI_CONFIDENCE_THRESHOLD = os.getenv("AI_CONFIDENCE_THRESHOLD", "MEDIUM")  # LOW | MEDIUM | HIGH
