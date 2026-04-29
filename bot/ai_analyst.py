@@ -4,7 +4,7 @@ import pandas as pd
 from groq import Groq
 from dataclasses import dataclass
 from bot.strategy import compute_indicators, Signal
-from config import GROQ_API_KEY, GROQ_MODEL, AI_CONFIDENCE_THRESHOLD, SYMBOL, TIMEFRAME
+from config import GROQ_API_KEY, GROQ_MODEL, AI_CONFIDENCE_THRESHOLD, TIMEFRAME
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class AISignal:
         return f"AI={self.signal.value} | Confidence={self.confidence} | {self.reasoning}"
 
 
-def _build_prompt(df: pd.DataFrame) -> str:
+def _build_prompt(df: pd.DataFrame, symbol: str) -> str:
     df = compute_indicators(df)
     df = df.dropna()
     last = df.iloc[-1]
@@ -70,7 +70,7 @@ def _build_prompt(df: pd.DataFrame) -> str:
 
     from config import EMA_FAST, EMA_SLOW, RSI_PERIOD
     return _USER_TEMPLATE.format(
-        symbol=SYMBOL,
+        symbol=symbol,
         timeframe=TIMEFRAME,
         price=last["close"],
         ema_fast=EMA_FAST,
@@ -102,11 +102,11 @@ def _parse_response(content: str) -> AISignal:
     return AISignal(signal, confidence, reasoning)
 
 
-def analyse(df: pd.DataFrame) -> AISignal:
+def analyse(df: pd.DataFrame, symbol: str) -> AISignal:
     client = Groq(api_key=GROQ_API_KEY)
-    prompt = _build_prompt(df)
+    prompt = _build_prompt(df, symbol)
 
-    log.debug("Sending market data to Groq (%s)...", GROQ_MODEL)
+    log.debug("Sending market data for %s to Groq (%s)...", symbol, GROQ_MODEL)
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
@@ -121,7 +121,7 @@ def analyse(df: pd.DataFrame) -> AISignal:
     log.debug("Groq raw response: %s", content)
 
     ai_signal = _parse_response(content)
-    log.info("[GROQ] %s", ai_signal)
+    log.info("[GROQ %s] %s", symbol, ai_signal)
     return ai_signal
 
 

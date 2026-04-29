@@ -9,3 +9,4 @@ dist/
 build/
 .DS_Store
 *.html   # backtesting.py output charts
+state.json

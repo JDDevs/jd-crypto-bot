@@ -9,8 +9,9 @@ API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 EXCHANGE_ID = os.getenv("EXCHANGE_ID", "binance")
 TESTNET = os.getenv("TESTNET", "true").lower() == "true"
 
-# Trading pair and timeframe
-SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
+# Trading pairs (comma-separated for multi-pair) and timeframe
+SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", os.getenv("SYMBOL", "BTC/USDT")).split(",") if s.strip()]
+SYMBOL = SYMBOLS[0]  # Backwards-compat single symbol used by backtest.py
 TIMEFRAME = os.getenv("TIMEFRAME", "5m")  # 1m, 5m, 15m, 1h
 
 # Strategy parameters (EMA crossover + RSI filter)
@@ -36,3 +37,8 @@ LOOP_SLEEP = int(os.getenv("LOOP_SLEEP", "30"))
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 AI_CONFIDENCE_THRESHOLD = os.getenv("AI_CONFIDENCE_THRESHOLD", "MEDIUM")  # LOW | MEDIUM | HIGH
+
+# Web dashboard
+DASHBOARD_ENABLED = os.getenv("DASHBOARD_ENABLED", "true").lower() == "true"
+DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
