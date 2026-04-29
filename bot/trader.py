@@ -1,19 +1,22 @@
 import time
 import logging
 import ccxt
-from dataclasses import asdict
+from groq import RateLimitError as GroqRateLimitError
 from config import SYMBOLS, TIMEFRAME, LOOP_SLEEP
 from bot.exchange import (
     fetch_candles, fetch_balance, fetch_ticker,
     place_market_order,
 )
-from bot.strategy import Signal
+from bot.strategy import Signal, evaluate
 from bot.ai_analyst import analyse, reflect, is_actionable
 from bot.risk import build_trade_setup, should_exit, TradeSetup
 from bot import state as state_mod
 from bot import notifier
 
 log = logging.getLogger(__name__)
+
+# How long to pause when Groq rate-limit is hit (seconds)
+_RATE_LIMIT_PAUSE = 120
 
 
 def _setup_from_dict(d: dict) -> TradeSetup:
@@ -47,6 +50,12 @@ class Trader:
             for symbol in SYMBOLS:
                 try:
                     self._tick(symbol)
+                except GroqRateLimitError as e:
+                    log.warning(
+                        "[%s] Groq rate limit hit — pausing %ds. %s",
+                        symbol, _RATE_LIMIT_PAUSE, e,
+                    )
+                    time.sleep(_RATE_LIMIT_PAUSE)
                 except ccxt.NetworkError as e:
                     log.warning("[%s] Network error: %s", symbol, e)
                 except ccxt.ExchangeError as e:
@@ -68,11 +77,21 @@ class Trader:
 
         # Record latest close for price-history chart
         state_mod.record_price(self.state, symbol, df.iloc[-1]["close"])
+        state_mod.save(self.state)
 
         if pair_state["open_trade"]:
             self._manage_open_trade(symbol, df)
             return
 
+        # Pre-filter: run cheap rule-based check before calling the AI.
+        # If indicators show no signal at all, skip the API call entirely.
+        rule = evaluate(df)
+        if rule.signal == Signal.HOLD:
+            log.debug("[%s] Rule-based HOLD — no AI call needed", symbol)
+            return
+
+        # Indicators see a potential signal → ask the AI for confirmation
+        log.info("[%s] Rule signal=%s RSI=%.1f — consulting AI...", symbol, rule.signal.value, rule.rsi)
         ai = analyse(df, symbol, pair_state)
         state_mod.record_ai_signal(self.state, symbol, ai.signal.value, ai.confidence, ai.reasoning)
         state_mod.save(self.state)
@@ -90,7 +109,6 @@ class Trader:
             log.warning("[%s] Insufficient balance: %.2f USDT", symbol, balance)
             return
 
-        # Split balance equally across configured pairs to bound exposure
         allocated = balance / max(len(SYMBOLS), 1)
         setup = build_trade_setup(allocated, price)
         log.info("[%s BUY] %s | Reason: %s", symbol, setup, reasoning)
@@ -106,23 +124,26 @@ class Trader:
         ticker = fetch_ticker(self.exchange, symbol)
         current_price = float(ticker["last"])
 
+        # SL / TP exit — no AI call needed
         exit_flag, reason = should_exit(current_price, setup)
         if exit_flag:
             self._close_trade(symbol, setup, current_price, reason)
             return
 
-        # AI early-exit check
-        ai = analyse(df, symbol, self.state["pairs"][symbol])
-        state_mod.record_ai_signal(self.state, symbol, ai.signal.value, ai.confidence, ai.reasoning)
-        state_mod.save(self.state)
+        # Only consult AI for early exit if rule-based indicators suggest bearish
+        rule = evaluate(df)
+        if rule.signal == Signal.SELL:
+            ai = analyse(df, symbol, self.state["pairs"][symbol])
+            state_mod.record_ai_signal(self.state, symbol, ai.signal.value, ai.confidence, ai.reasoning)
+            state_mod.save(self.state)
+            if ai.signal == Signal.SELL and is_actionable(ai):
+                self._close_trade(symbol, setup, current_price, f"AI_SELL ({ai.confidence})")
+                return
 
-        if ai.signal == Signal.SELL and is_actionable(ai):
-            self._close_trade(symbol, setup, current_price, f"AI_SELL ({ai.confidence})")
-        else:
-            log.info(
-                "[%s HOLD TRADE] price=%.4f TP=%.4f SL=%.4f | %s",
-                symbol, current_price, setup.take_profit, setup.stop_loss, ai,
-            )
+        log.info(
+            "[%s HOLD TRADE] price=%.4f TP=%.4f SL=%.4f",
+            symbol, current_price, setup.take_profit, setup.stop_loss,
+        )
 
     def _close_trade(self, symbol: str, setup: TradeSetup, price: float, reason: str) -> None:
         log.info("[%s SELL] reason=%s price=%.4f", symbol, reason, price)
@@ -140,7 +161,7 @@ class Trader:
         )
         notifier.notify_close(symbol, setup.entry_price, price, pnl, reason, total)
 
-        # Self-reflection: ask Groq for a lesson learned
+        # Self-reflection — only 1 extra call per closed trade
         lesson = reflect(symbol, closed)
         if lesson:
             state_mod.record_lesson(self.state, symbol, lesson)
