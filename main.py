@@ -58,7 +58,7 @@ def main() -> None:
     setup_logging()
     if DASHBOARD_ENABLED:
         start_dashboard()
-    start_report_thread(interval_seconds=300)  # every 5 minutes
+    start_report_thread(interval_seconds=3600)  # every hour
     exchange = build_exchange()
     Trader(exchange).run()
 

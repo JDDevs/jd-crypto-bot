@@ -17,6 +17,7 @@ class StrategyResult:
     ema_slow: float
     rsi: float
     close: float
+    trigger: str = ""
 
     def __str__(self) -> str:
         return (
@@ -72,11 +73,22 @@ def evaluate(df: pd.DataFrame) -> StrategyResult:
     ema_bearish_cross = (ema_fast_prev > ema_slow_prev and ema_fast_now < ema_slow_now)
     rsi_exhaustion    = (rsi_prev >= RSI_OVERBOUGHT and rsi_now < RSI_OVERBOUGHT)  # RSI dropping from overbought
 
+    trigger = ""
     if (ema_bullish_cross or rsi_recovery or trend_entry) and rsi_now < RSI_OVERBOUGHT:
         signal = Signal.BUY
+        if ema_bullish_cross:
+            trigger = f"EMA{EMA_FAST} cruzó sobre EMA{EMA_SLOW} — cruce alcista confirmado"
+        elif rsi_recovery:
+            trigger = f"RSI saliendo de zona sobrevendida ({rsi_prev:.1f} → {rsi_now:.1f})"
+        elif trend_entry:
+            trigger = f"RSI tomando impulso en tendencia alcista ({rsi_prev:.1f} → {rsi_now:.1f})"
     elif (ema_bearish_cross or rsi_exhaustion) and rsi_now > RSI_OVERSOLD:
         signal = Signal.SELL
+        if ema_bearish_cross:
+            trigger = f"EMA{EMA_FAST} cruzó bajo EMA{EMA_SLOW} — cruce bajista confirmado"
+        elif rsi_exhaustion:
+            trigger = f"RSI bajando desde sobrecompra ({rsi_prev:.1f} → {rsi_now:.1f})"
     else:
         signal = Signal.HOLD
 
-    return StrategyResult(signal, ema_fast_now, ema_slow_now, rsi_now, close)
+    return StrategyResult(signal, ema_fast_now, ema_slow_now, rsi_now, close, trigger)

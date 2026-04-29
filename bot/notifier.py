@@ -36,16 +36,22 @@ def _send(text: str) -> None:
 # ---------------------------------------------------------------------------
 
 def notify_buy(symbol: str, entry: float, tp: float, sl: float,
-               quantity: float, reasoning: str) -> None:
+               quantity: float, reasoning: str,
+               confidence: str = "", trigger: str = "") -> None:
     tp_pct = (tp / entry - 1) * 100
     sl_pct = (1 - sl / entry) * 100
+    conf_label = {"HIGH": "🔥 ALTA", "MEDIUM": "✅ MEDIA", "LOW": "👀 BAJA"}.get(confidence.upper(), "")
+    trigger_line = f"\n📊 *Señal:* {trigger}" if trigger else ""
+    conf_line = f"\n🎯 *Confianza IA:* {conf_label}" if conf_label else ""
     _send(
-        f"🟢 *BUY* — {symbol}\n"
-        f"Entry:  `{entry:,.4f}` USDT\n"
-        f"TP:     `{tp:,.4f}` *(+{tp_pct:.2f}%)*\n"
-        f"SL:     `{sl:,.4f}` *(-{sl_pct:.2f}%)*\n"
-        f"Qty:    `{quantity:.6f}`\n"
-        f"📝 _{reasoning}_"
+        f"🟢 *SEÑAL DE ENTRADA* — {symbol}"
+        f"{trigger_line}"
+        f"{conf_line}"
+        f"\n\n💬 _\"{reasoning}\"_"
+        f"\n\n💰 Precio: `{entry:,.4f}` USDT"
+        f"\n🎯 TP ref: `{tp:,.4f}` *(+{tp_pct:.2f}%)*"
+        f"\n🛡️ SL ref: `{sl:,.4f}` *(-{sl_pct:.2f}%)*"
+        f"\n\n⚡ _El bot entró. Decide si operas manualmente._"
     )
 
 
@@ -54,12 +60,21 @@ def notify_close(symbol: str, entry: float, exit_price: float,
     emoji = "✅" if pnl >= 0 else "❌"
     pnl_sign = "+" if pnl >= 0 else ""
     total_sign = "+" if total_pnl >= 0 else ""
+    pct = (exit_price / entry - 1) * 100
+    pct_sign = "+" if pct >= 0 else ""
+    reason_labels = {
+        "TAKE_PROFIT": "🎯 Take Profit alcanzado",
+        "STOP_LOSS":   "🛡️ Stop Loss activado",
+    }
+    reason_str = reason_labels.get(reason, f"🤖 IA cerró ({reason})")
+    tip = "💡 _Si estabas en posición, considera salir._" if pnl < 0 else "💡 _Buen momento para asegurar ganancias._"
     _send(
-        f"{emoji} *CLOSED* — {symbol}\n"
-        f"Reason: `{reason}`\n"
-        f"Entry:  `{entry:,.4f}` → Exit: `{exit_price:,.4f}`\n"
-        f"PnL:    `{pnl_sign}{pnl:.4f}` USDT\n"
-        f"Total PnL: `{total_sign}{total_pnl:.4f}` USDT"
+        f"{emoji} *SEÑAL DE SALIDA* — {symbol}\n"
+        f"Motivo: {reason_str}\n"
+        f"\nEntrada: `{entry:,.4f}` → Salida: `{exit_price:,.4f}` *({pct_sign}{pct:.2f}%)*\n"
+        f"PnL bot: `{pnl_sign}{pnl:.4f}` USDT\n"
+        f"PnL total: `{total_sign}{total_pnl:.4f}` USDT\n"
+        f"\n{tip}"
     )
 
 

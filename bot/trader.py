@@ -92,13 +92,14 @@ class Trader:
         state_mod.save(self.state)
 
         if ai.signal == Signal.BUY and is_actionable(ai):
-            self._open_trade(symbol, df.iloc[-1]["close"], ai.reasoning)
+            self._open_trade(symbol, df.iloc[-1]["close"], ai.reasoning, ai.confidence, rule.trigger)
         elif ai.signal == Signal.SELL and is_actionable(ai):
             log.info("[%s SKIP SELL] No open position to close.", symbol)
         else:
             log.info("[%s HOLD] %s", symbol, ai)
 
-    def _open_trade(self, symbol: str, price: float, reasoning: str) -> None:
+    def _open_trade(self, symbol: str, price: float, reasoning: str,
+                    confidence: str = "", trigger: str = "") -> None:
         balance = fetch_balance(self.exchange, "USDT")
         if balance < 10:
             log.warning("[%s] Insufficient balance: %.2f USDT", symbol, balance)
@@ -112,7 +113,7 @@ class Trader:
         state_mod.record_open(self.state, symbol, setup, reasoning)
         state_mod.save(self.state)
         notifier.notify_buy(symbol, setup.entry_price, setup.take_profit,
-                            setup.stop_loss, setup.quantity, reasoning)
+                            setup.stop_loss, setup.quantity, reasoning, confidence, trigger)
 
     def _manage_open_trade(self, symbol: str, df) -> None:
         setup = _setup_from_dict(self.state["pairs"][symbol]["open_trade"])
