@@ -1,5 +1,4 @@
 import pandas as pd
-import pandas_ta as ta
 from dataclasses import dataclass
 from enum import Enum
 from config import EMA_FAST, EMA_SLOW, RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT
@@ -27,18 +26,28 @@ class StrategyResult:
         )
 
 
+def _ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False).mean()
+
+
+def _rsi(series: pd.Series, period: int) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0).ewm(com=period - 1, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(com=period - 1, adjust=False).mean()
+    rs = gain / loss.replace(0, float("inf"))
+    return 100 - (100 / (1 + rs))
+
+
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df[f"ema_fast"] = ta.ema(df["close"], length=EMA_FAST)
-    df[f"ema_slow"] = ta.ema(df["close"], length=EMA_SLOW)
-    df["rsi"] = ta.rsi(df["close"], length=RSI_PERIOD)
+    df["ema_fast"] = _ema(df["close"], EMA_FAST)
+    df["ema_slow"] = _ema(df["close"], EMA_SLOW)
+    df["rsi"] = _rsi(df["close"], RSI_PERIOD)
     return df
 
 
 def evaluate(df: pd.DataFrame) -> StrategyResult:
-    """Evaluate the last two candles to detect an EMA crossover with RSI filter."""
-    df = compute_indicators(df)
-    df.dropna(inplace=True)
+    df = compute_indicators(df).dropna()
 
     if len(df) < 2:
         return StrategyResult(Signal.HOLD, 0, 0, 50, 0)
@@ -46,21 +55,17 @@ def evaluate(df: pd.DataFrame) -> StrategyResult:
     prev = df.iloc[-2]
     curr = df.iloc[-1]
 
-    ema_fast_now = curr["ema_fast"]
-    ema_slow_now = curr["ema_slow"]
+    ema_fast_now  = curr["ema_fast"]
+    ema_slow_now  = curr["ema_slow"]
     ema_fast_prev = prev["ema_fast"]
     ema_slow_prev = prev["ema_slow"]
-    rsi = curr["rsi"]
+    rsi   = curr["rsi"]
     close = curr["close"]
 
-    # Bullish crossover: fast crosses above slow, RSI not overbought
     if ema_fast_prev < ema_slow_prev and ema_fast_now > ema_slow_now and rsi < RSI_OVERBOUGHT:
         signal = Signal.BUY
-
-    # Bearish crossover: fast crosses below slow, RSI not oversold
     elif ema_fast_prev > ema_slow_prev and ema_fast_now < ema_slow_now and rsi > RSI_OVERSOLD:
         signal = Signal.SELL
-
     else:
         signal = Signal.HOLD
 

@@ -1,6 +1,5 @@
 ccxt==4.3.89
-pandas==2.2.2
-pandas-ta==0.4.71b0
+pandas>=2.0.0
 python-dotenv==1.0.1
 backtesting==0.3.3
 colorlog==6.8.2
