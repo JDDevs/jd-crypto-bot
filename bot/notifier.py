@@ -69,3 +69,55 @@ def notify_lesson(symbol: str, lesson: str) -> None:
 
 def notify_error(symbol: str, error: str) -> None:
     _send(f"⚠️ *Error* — {symbol}\n`{error}`")
+
+
+def notify_report(state: dict) -> None:
+    from datetime import datetime, timezone
+    from bot import state as state_mod
+
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    total = state_mod.total_pnl(state)
+    total_sign = "+" if total >= 0 else ""
+    total_emoji = "📈" if total > 0 else ("📉" if total < 0 else "➡️")
+
+    lines = [
+        f"📊 *JD Bot — Reporte* | {now}",
+        f"{total_emoji} Total PnL: `{total_sign}{total:.4f}` USDT",
+        "",
+    ]
+
+    for symbol, p in state.get("pairs", {}).items():
+        stats  = p.get("stats", {})
+        wins   = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        pnl    = stats.get("total_pnl", 0.0)
+        signal = p.get("last_ai_signal") or {}
+
+        # Last known price from price_history
+        ph = p.get("price_history", [])
+        price_str = f"`{ph[-1]['p']:,.4f}`" if ph else "—"
+
+        open_trade = p.get("open_trade")
+        if open_trade:
+            entry  = open_trade["entry_price"]
+            tp     = open_trade["take_profit"]
+            sl     = open_trade["stop_loss"]
+            last_p = ph[-1]["p"] if ph else entry
+            unrealised = (last_p - entry) * open_trade["quantity"]
+            u_sign = "+" if unrealised >= 0 else ""
+            lines.append(
+                f"🟡 *{symbol}* — EN POSICIÓN\n"
+                f"   Entrada: `{entry:,.4f}` | Precio: {price_str}\n"
+                f"   TP: `{tp:,.4f}` | SL: `{sl:,.4f}`\n"
+                f"   PnL latente: `{u_sign}{unrealised:.4f}` USDT"
+            )
+        else:
+            sig_txt = signal.get("decision", "—")
+            conf    = signal.get("confidence", "")
+            sig_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "⚪"}.get(sig_txt, "⚪")
+            lines.append(
+                f"{sig_emoji} *{symbol}* | {sig_txt} ({conf}) | {price_str}\n"
+                f"   {wins}W/{losses}L | PnL: `{'+' if pnl>=0 else ''}{pnl:.4f}` USDT"
+            )
+
+    _send("\n".join(lines))

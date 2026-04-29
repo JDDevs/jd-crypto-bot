@@ -7,6 +7,7 @@ Usage:
 """
 import logging
 import threading
+import time
 import colorlog
 from config import DASHBOARD_ENABLED, DASHBOARD_HOST, DASHBOARD_PORT
 from bot.exchange import build_exchange
@@ -38,10 +39,26 @@ def start_dashboard() -> None:
     t.start()
 
 
+def start_report_thread(interval_seconds: int = 300) -> None:
+    def _loop() -> None:
+        from bot import state as state_mod
+        from bot.notifier import notify_report
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                notify_report(state_mod.load())
+            except Exception as e:
+                logging.getLogger(__name__).warning("Report failed: %s", e)
+
+    t = threading.Thread(target=_loop, daemon=True, name="report")
+    t.start()
+
+
 def main() -> None:
     setup_logging()
     if DASHBOARD_ENABLED:
         start_dashboard()
+    start_report_thread(interval_seconds=300)  # every 5 minutes
     exchange = build_exchange()
     Trader(exchange).run()
 
