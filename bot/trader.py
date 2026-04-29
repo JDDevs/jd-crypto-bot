@@ -29,6 +29,9 @@ class Trader:
     def __init__(self, exchange: ccxt.Exchange):
         self.exchange = exchange
         self.state = state_mod.load()
+        removed = state_mod.cleanup_orphans(self.state, SYMBOLS)
+        if removed:
+            log.info("Cleaned up %d orphan pair(s) no longer in SYMBOLS", removed)
         for sym in SYMBOLS:
             state_mod.ensure_pair(self.state, sym)
         state_mod.save(self.state)
@@ -61,6 +64,9 @@ class Trader:
     def _tick(self, symbol: str) -> None:
         df = fetch_candles(self.exchange, symbol)
         pair_state = self.state["pairs"][symbol]
+
+        # Record latest close for price-history chart
+        state_mod.record_price(self.state, symbol, df.iloc[-1]["close"])
 
         if pair_state["open_trade"]:
             self._manage_open_trade(symbol, df)

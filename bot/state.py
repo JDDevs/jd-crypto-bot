@@ -44,8 +44,29 @@ def ensure_pair(state: dict[str, Any], symbol: str) -> dict[str, Any]:
             "open_trade": None,
             "stats": {"wins": 0, "losses": 0, "total_pnl": 0.0},
             "last_ai_signal": None,
+            "price_history": [],
+            "equity_history": [],
         }
+    else:
+        # Backfill keys for older state files
+        state["pairs"][symbol].setdefault("price_history", [])
+        state["pairs"][symbol].setdefault("equity_history", [])
     return state["pairs"][symbol]
+
+
+def cleanup_orphans(state: dict[str, Any], valid_symbols: list[str]) -> int:
+    """Remove pairs that are no longer in the configured SYMBOLS list."""
+    valid = set(valid_symbols)
+    orphans = [s for s in state["pairs"].keys() if s not in valid]
+    for s in orphans:
+        del state["pairs"][s]
+    return len(orphans)
+
+
+def record_price(state: dict[str, Any], symbol: str, price: float, max_points: int = 200) -> None:
+    pair = ensure_pair(state, symbol)
+    pair["price_history"].append({"t": _now(), "p": float(price)})
+    pair["price_history"] = pair["price_history"][-max_points:]
 
 
 def record_ai_signal(state: dict[str, Any], symbol: str,
@@ -89,6 +110,11 @@ def record_close(state: dict[str, Any], symbol: str, price: float,
     else:
         pair["stats"]["losses"] += 1
     pair["stats"]["total_pnl"] = round(pair["stats"]["total_pnl"] + pnl, 6)
+    pair.setdefault("equity_history", []).append({
+        "t": _now(),
+        "v": pair["stats"]["total_pnl"],
+    })
+    pair["equity_history"] = pair["equity_history"][-200:]
     state["trade_history"].append({
         "timestamp": _now(),
         "symbol":    symbol,
