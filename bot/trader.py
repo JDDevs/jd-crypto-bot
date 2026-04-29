@@ -11,6 +11,7 @@ from bot.strategy import Signal
 from bot.ai_analyst import analyse, reflect, is_actionable
 from bot.risk import build_trade_setup, should_exit, TradeSetup
 from bot import state as state_mod
+from bot import notifier
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +98,8 @@ class Trader:
 
         state_mod.record_open(self.state, symbol, setup, reasoning)
         state_mod.save(self.state)
+        notifier.notify_buy(symbol, setup.entry_price, setup.take_profit,
+                            setup.stop_loss, setup.quantity, reasoning)
 
     def _manage_open_trade(self, symbol: str, df) -> None:
         setup = _setup_from_dict(self.state["pairs"][symbol]["open_trade"])
@@ -130,14 +133,16 @@ class Trader:
         state_mod.save(self.state)
 
         stats = self.state["pairs"][symbol]["stats"]
+        total = state_mod.total_pnl(self.state)
         log.info(
             "[%s CLOSED] PnL=%.4f USDT | Wins=%d Losses=%d Pair PnL=%.4f | Total=%.4f",
-            symbol, pnl, stats["wins"], stats["losses"], stats["total_pnl"],
-            state_mod.total_pnl(self.state),
+            symbol, pnl, stats["wins"], stats["losses"], stats["total_pnl"], total,
         )
+        notifier.notify_close(symbol, setup.entry_price, price, pnl, reason, total)
 
         # Self-reflection: ask Groq for a lesson learned
         lesson = reflect(symbol, closed)
         if lesson:
             state_mod.record_lesson(self.state, symbol, lesson)
             state_mod.save(self.state)
+            notifier.notify_lesson(symbol, lesson)
