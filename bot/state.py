@@ -20,7 +20,7 @@ def _now() -> str:
 
 
 def _empty() -> dict[str, Any]:
-    return {"pairs": {}, "trade_history": []}
+    return {"pairs": {}, "trade_history": [], "balance_usdt": 0.0}
 
 
 def load() -> dict[str, Any]:
@@ -161,6 +161,10 @@ def record_lesson(state: dict[str, Any], symbol: str, lesson: str, max_lessons: 
         "lesson": lesson,
     })
     pair["lessons_learned"] = pair["lessons_learned"][-max_lessons:]
+
+
+def record_balance(state: dict[str, Any], balance_usdt: float) -> None:
+    state["balance_usdt"] = round(balance_usdt, 2)
 
 
 def total_pnl(state: dict[str, Any]) -> float:

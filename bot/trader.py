@@ -47,6 +47,11 @@ class Trader:
     def run(self) -> None:
         log.info("Bot started — pairs=%s timeframe=%s model=groq", SYMBOLS, TIMEFRAME)
         while True:
+            try:
+                balance = fetch_balance(self.exchange, "USDT")
+                state_mod.record_balance(self.state, balance)
+            except Exception:
+                pass
             for symbol in SYMBOLS:
                 try:
                     self._tick(symbol)

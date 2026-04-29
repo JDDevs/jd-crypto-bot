@@ -61,9 +61,10 @@ _PAGE = """
 
   <div class="summary">
     <div>
-      <div class="label">Total PnL</div>
-      <div class="pnl {{ 'pos' if total_pnl > 0 else ('neg' if total_pnl < 0 else 'neu') }}">
-        {{ '%+.4f'|format(total_pnl) }} USDT
+      <div class="label">Balance USDT</div>
+      <div class="pnl neu">{{ '{:,.2f}'.format(balance) }} USDT</div>
+      <div style="font-size:13px; margin-top:4px;" class="{{ 'pos' if total_pnl > 0 else ('neg' if total_pnl < 0 else 'neu') }}">
+        PnL: {{ '%+.4f'|format(total_pnl) }} USDT
       </div>
     </div>
     <div>
@@ -241,6 +242,7 @@ def index():
         _PAGE,
         pairs=state.get("pairs", {}),
         history=history,
+        balance=state.get("balance_usdt", 0.0),
         total_pnl=state_mod.total_pnl(state),
         chart_data=_build_chart_data(state),
     )

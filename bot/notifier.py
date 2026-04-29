@@ -79,10 +79,12 @@ def notify_report(state: dict) -> None:
     total = state_mod.total_pnl(state)
     total_sign = "+" if total >= 0 else ""
     total_emoji = "📈" if total > 0 else ("📉" if total < 0 else "➡️")
+    balance = state.get("balance_usdt", 0.0)
 
     lines = [
         f"📊 *JD Bot — Reporte* | {now}",
-        f"{total_emoji} Total PnL: `{total_sign}{total:.4f}` USDT",
+        f"💰 Balance: `{balance:,.2f}` USDT",
+        f"{total_emoji} PnL total: `{total_sign}{total:.4f}` USDT",
         "",
     ]
 
