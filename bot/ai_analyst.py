@@ -1,10 +1,15 @@
 import json
 import logging
 import pandas as pd
-from groq import Groq
+import httpx
+from groq import Groq, RateLimitError as GroqRateLimitError
 from dataclasses import dataclass
 from bot.strategy import compute_indicators, Signal
-from config import GROQ_API_KEY, GROQ_MODEL, AI_CONFIDENCE_THRESHOLD, TIMEFRAME
+from config import (
+    GROQ_API_KEY, GROQ_MODEL,
+    GEMINI_API_KEY, GEMINI_MODEL,
+    AI_CONFIDENCE_THRESHOLD, TIMEFRAME,
+)
 
 log = logging.getLogger(__name__)
 
@@ -161,14 +166,11 @@ def _parse_response(content: str) -> AISignal:
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# LLM provider calls (Groq primary, Gemini fallback)
 # ---------------------------------------------------------------------------
 
-def analyse(df: pd.DataFrame, symbol: str, pair_state: dict | None = None) -> AISignal:
+def _call_groq(prompt: str, max_tokens: int = 150) -> str:
     client = Groq(api_key=GROQ_API_KEY)
-    prompt = _build_prompt(df, symbol, pair_state)
-
-    log.debug("Sending market data for %s to Groq (%s)...", symbol, GROQ_MODEL)
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
@@ -176,26 +178,59 @@ def analyse(df: pd.DataFrame, symbol: str, pair_state: dict | None = None) -> AI
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
-        max_tokens=150,
+        max_tokens=max_tokens,
     )
+    return response.choices[0].message.content
 
-    content = response.choices[0].message.content
-    log.debug("Groq raw response: %s", content)
 
+def _call_gemini(prompt: str) -> str:
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    body = {
+        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 150},
+    }
+    resp = httpx.post(url, json=body, timeout=30)
+    resp.raise_for_status()
+    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def _call_llm(prompt: str, max_tokens: int = 150) -> tuple[str, str]:
+    """Returns (content, provider_name). Tries Groq first, falls back to Gemini."""
+    if GROQ_API_KEY:
+        try:
+            return _call_groq(prompt, max_tokens), "GROQ"
+        except GroqRateLimitError:
+            log.warning("Groq rate limit hit — switching to Gemini fallback")
+        except Exception as e:
+            log.warning("Groq error: %s — switching to Gemini fallback", e)
+
+    if GEMINI_API_KEY:
+        return _call_gemini(prompt), "GEMINI"
+
+    raise RuntimeError("No AI provider available. Set GROQ_API_KEY or GEMINI_API_KEY in .env")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def analyse(df: pd.DataFrame, symbol: str, pair_state: dict | None = None) -> AISignal:
+    prompt = _build_prompt(df, symbol, pair_state)
+    content, provider = _call_llm(prompt)
+    log.debug("%s raw response: %s", provider, content)
     ai_signal = _parse_response(content)
-    log.info("[GROQ %s] %s", symbol, ai_signal)
+    log.info("[%s %s] %s", provider, symbol, ai_signal)
     return ai_signal
 
 
 def reflect(symbol: str, closed_trade: dict) -> str:
-    """
-    Ask Groq to extract a one-sentence lesson from a closed trade.
-    Returns the lesson string (empty if it failed).
-    """
     if not closed_trade.get("entry_reasoning"):
         return ""
 
-    client = Groq(api_key=GROQ_API_KEY)
     prompt = REFLECTION_PROMPT.format(
         symbol=symbol,
         entry_price=closed_trade["entry_price"],
@@ -204,25 +239,15 @@ def reflect(symbol: str, closed_trade: dict) -> str:
         pnl=closed_trade["pnl"],
         exit_reason=closed_trade["exit_reason"],
     )
-
     try:
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            max_tokens=100,
-        )
-        content = response.choices[0].message.content.strip()
+        content, provider = _call_llm(prompt, max_tokens=100)
         if content.startswith("```"):
             content = content.split("```")[1]
             if content.startswith("json"):
                 content = content[4:]
         data = json.loads(content.strip())
         lesson = data.get("lesson", "").strip()
-        log.info("[REFLECT %s] %s", symbol, lesson)
+        log.info("[REFLECT/%s %s] %s", provider, symbol, lesson)
         return lesson
     except Exception as e:
         log.warning("[REFLECT %s] Failed: %s", symbol, e)

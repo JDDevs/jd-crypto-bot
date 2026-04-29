@@ -1,7 +1,6 @@
 import time
 import logging
 import ccxt
-from groq import RateLimitError as GroqRateLimitError
 from config import SYMBOLS, TIMEFRAME, LOOP_SLEEP
 from bot.exchange import (
     fetch_candles, fetch_balance, fetch_ticker,
@@ -14,9 +13,6 @@ from bot import state as state_mod
 from bot import notifier
 
 log = logging.getLogger(__name__)
-
-# How long to pause when Groq rate-limit is hit (seconds)
-_RATE_LIMIT_PAUSE = 120
 
 
 def _setup_from_dict(d: dict) -> TradeSetup:
@@ -55,12 +51,6 @@ class Trader:
             for symbol in SYMBOLS:
                 try:
                     self._tick(symbol)
-                except GroqRateLimitError as e:
-                    log.warning(
-                        "[%s] Groq rate limit hit — pausing %ds. %s",
-                        symbol, _RATE_LIMIT_PAUSE, e,
-                    )
-                    time.sleep(_RATE_LIMIT_PAUSE)
                 except ccxt.NetworkError as e:
                     log.warning("[%s] Network error: %s", symbol, e)
                 except ccxt.ExchangeError as e:
