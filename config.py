@@ -36,7 +36,7 @@ LOOP_SLEEP = int(os.getenv("LOOP_SLEEP", "30"))
 # Groq AI
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-AI_CONFIDENCE_THRESHOLD = os.getenv("AI_CONFIDENCE_THRESHOLD", "MEDIUM")  # LOW | MEDIUM | HIGH
+AI_CONFIDENCE_THRESHOLD = os.getenv("AI_CONFIDENCE_THRESHOLD", "LOW")  # LOW | MEDIUM | HIGH
 
 # Web dashboard
 DASHBOARD_ENABLED = os.getenv("DASHBOARD_ENABLED", "true").lower() == "true"

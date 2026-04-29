@@ -59,14 +59,24 @@ def evaluate(df: pd.DataFrame) -> StrategyResult:
     ema_slow_now  = curr["ema_slow"]
     ema_fast_prev = prev["ema_fast"]
     ema_slow_prev = prev["ema_slow"]
-    rsi   = curr["rsi"]
-    close = curr["close"]
+    rsi_now  = curr["rsi"]
+    rsi_prev = prev["rsi"]
+    close    = curr["close"]
 
-    if ema_fast_prev < ema_slow_prev and ema_fast_now > ema_slow_now and rsi < RSI_OVERBOUGHT:
+    # --- BUY conditions (any one is enough to trigger an AI consultation) ---
+    ema_bullish_cross = (ema_fast_prev < ema_slow_prev and ema_fast_now > ema_slow_now)
+    rsi_recovery      = (rsi_prev <= RSI_OVERSOLD and rsi_now > RSI_OVERSOLD)  # RSI climbing out of oversold
+    trend_entry       = (ema_fast_now > ema_slow_now and rsi_prev < 45 <= rsi_now)  # RSI crosses 45 in bullish trend
+
+    # --- SELL conditions ---
+    ema_bearish_cross = (ema_fast_prev > ema_slow_prev and ema_fast_now < ema_slow_now)
+    rsi_exhaustion    = (rsi_prev >= RSI_OVERBOUGHT and rsi_now < RSI_OVERBOUGHT)  # RSI dropping from overbought
+
+    if (ema_bullish_cross or rsi_recovery or trend_entry) and rsi_now < RSI_OVERBOUGHT:
         signal = Signal.BUY
-    elif ema_fast_prev > ema_slow_prev and ema_fast_now < ema_slow_now and rsi > RSI_OVERSOLD:
+    elif (ema_bearish_cross or rsi_exhaustion) and rsi_now > RSI_OVERSOLD:
         signal = Signal.SELL
     else:
         signal = Signal.HOLD
 
-    return StrategyResult(signal, ema_fast_now, ema_slow_now, rsi, close)
+    return StrategyResult(signal, ema_fast_now, ema_slow_now, rsi_now, close)
