@@ -116,12 +116,20 @@ class Trader:
                             setup.stop_loss, setup.quantity, reasoning, confidence, trigger)
 
     def _manage_open_trade(self, symbol: str, df) -> None:
-        setup = _setup_from_dict(self.state["pairs"][symbol]["open_trade"])
+        open_trade = self.state["pairs"][symbol]["open_trade"]
+        setup = _setup_from_dict(open_trade)
         ticker = fetch_ticker(self.exchange, symbol)
         current_price = float(ticker["last"])
 
-        # SL / TP exit — no AI call needed
-        exit_flag, reason = should_exit(current_price, setup)
+        # Update peak price for trailing stop (backfills field if missing)
+        highest = open_trade.get("highest_price", setup.entry_price)
+        if current_price > highest:
+            highest = current_price
+            open_trade["highest_price"] = highest
+            state_mod.save(self.state)
+
+        # SL / TP / Trailing exit — no AI call needed
+        exit_flag, reason = should_exit(current_price, setup, highest)
         if exit_flag:
             self._close_trade(symbol, setup, current_price, reason)
             return

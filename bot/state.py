@@ -92,6 +92,7 @@ def record_open(state: dict[str, Any], symbol: str, setup: Any, reasoning: str) 
         "stop_loss":       setup.stop_loss,
         "quantity":        setup.quantity,
         "risk_amount":     setup.risk_amount,
+        "highest_price":   setup.entry_price,
         "opened_at":       _now(),
         "entry_reasoning": reasoning,
     }

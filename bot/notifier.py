@@ -63,8 +63,9 @@ def notify_close(symbol: str, entry: float, exit_price: float,
     pct = (exit_price / entry - 1) * 100
     pct_sign = "+" if pct >= 0 else ""
     reason_labels = {
-        "TAKE_PROFIT": "🎯 Take Profit alcanzado",
-        "STOP_LOSS":   "🛡️ Stop Loss activado",
+        "TAKE_PROFIT":   "🎯 Take Profit alcanzado",
+        "STOP_LOSS":     "🛡️ Stop Loss activado",
+        "TRAILING_STOP": "📉 Trailing stop — ganancia bloqueada",
     }
     reason_str = reason_labels.get(reason, f"🤖 IA cerró ({reason})")
     tip = "💡 _Si estabas en posición, considera salir._" if pnl < 0 else "💡 _Buen momento para asegurar ganancias._"

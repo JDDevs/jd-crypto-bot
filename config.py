@@ -27,6 +27,11 @@ TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.006"))  # 0.6%
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.003"))     # 0.3%
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "1"))
 
+# Trailing stop — locks in profit as price moves up
+TRAILING_STOP_ENABLED = os.getenv("TRAILING_STOP_ENABLED", "true").lower() == "true"
+TRAILING_ACTIVATE_PCT = float(os.getenv("TRAILING_ACTIVATE_PCT", "0.003"))  # arms after +0.3%
+TRAILING_DISTANCE_PCT = float(os.getenv("TRAILING_DISTANCE_PCT", "0.002"))  # trails 0.2% behind peak
+
 # Candles to fetch
 CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "100"))
 

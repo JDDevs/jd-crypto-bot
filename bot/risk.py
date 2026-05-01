@@ -1,5 +1,8 @@
 from dataclasses import dataclass
-from config import RISK_PER_TRADE, TAKE_PROFIT_PCT, STOP_LOSS_PCT
+from config import (
+    RISK_PER_TRADE, TAKE_PROFIT_PCT, STOP_LOSS_PCT,
+    TRAILING_STOP_ENABLED, TRAILING_ACTIVATE_PCT, TRAILING_DISTANCE_PCT,
+)
 
 
 @dataclass
@@ -27,10 +30,24 @@ def build_trade_setup(balance_usdt: float, entry_price: float) -> TradeSetup:
     return TradeSetup(entry_price, take_profit, stop_loss, quantity, risk_amount)
 
 
-def should_exit(current_price: float, setup: TradeSetup) -> tuple[bool, str]:
+def trailing_stop_price(setup: TradeSetup, highest_price: float) -> float | None:
+    """Returns the trailing stop level once armed, else None."""
+    if not TRAILING_STOP_ENABLED:
+        return None
+    activation_price = setup.entry_price * (1 + TRAILING_ACTIVATE_PCT)
+    if highest_price < activation_price:
+        return None
+    return highest_price * (1 - TRAILING_DISTANCE_PCT)
+
+
+def should_exit(current_price: float, setup: TradeSetup,
+                highest_price: float = 0.0) -> tuple[bool, str]:
     """Returns (should_exit, reason)."""
-    if current_price >= setup.take_profit:
-        return True, "TAKE_PROFIT"
     if current_price <= setup.stop_loss:
         return True, "STOP_LOSS"
+    if current_price >= setup.take_profit:
+        return True, "TAKE_PROFIT"
+    trail = trailing_stop_price(setup, highest_price)
+    if trail is not None and current_price <= trail:
+        return True, "TRAILING_STOP"
     return False, ""
