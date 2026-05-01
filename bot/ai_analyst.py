@@ -300,7 +300,19 @@ def reflect(symbol: str, closed_trade: dict) -> str:
             content = content.split("```")[1]
             if content.startswith("json"):
                 content = content[4:]
-        data = json.loads(content.strip())
+        content = content.strip()
+
+        data: dict = {}
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            m = re.search(r"\{[^{}]+\}", content, re.DOTALL)
+            if m:
+                try:
+                    data = json.loads(m.group())
+                except json.JSONDecodeError:
+                    data = ast.literal_eval(m.group())
+
         lesson = data.get("lesson", "").strip()
         log.info("[REFLECT/%s %s] %s", provider, symbol, lesson)
         return lesson
@@ -359,7 +371,19 @@ def macro_analysis(symbol_data: dict, fear_greed: int) -> tuple[str, str]:
             content = content.split("```")[1]
             if content.startswith("json"):
                 content = content[4:]
-        data = json.loads(content.strip())
+        content = content.strip()
+
+        data: dict = {}
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            m = re.search(r"\{[^{}]+\}", content, re.DOTALL)
+            if m:
+                try:
+                    data = json.loads(m.group())
+                except json.JSONDecodeError:
+                    data = ast.literal_eval(m.group())
+
         outlook = data.get("outlook", "NEUTRAL").upper()
         if outlook not in ("FAVORABLE", "NEUTRAL", "UNFAVORABLE"):
             outlook = "NEUTRAL"
