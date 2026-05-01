@@ -1,4 +1,6 @@
 import json
+import re
+import ast
 import logging
 import pandas as pd
 import httpx
@@ -178,11 +180,33 @@ def _build_prompt(df: pd.DataFrame, symbol: str, pair_state: dict | None = None)
 
 def _parse_response(content: str) -> AISignal:
     content = content.strip()
+
+    # Strip markdown code fences
     if content.startswith("```"):
         content = content.split("```")[1]
         if content.startswith("json"):
             content = content[4:]
-    data = json.loads(content.strip())
+    content = content.strip()
+
+    data: dict = {}
+    # 1st attempt: standard JSON
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        # 2nd attempt: extract first {...} block and parse
+        m = re.search(r"\{[^{}]+\}", content, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group())
+            except json.JSONDecodeError:
+                # 3rd attempt: ast.literal_eval handles single-quoted dicts
+                try:
+                    data = ast.literal_eval(m.group())
+                except Exception:
+                    pass
+        if not data:
+            log.warning("Could not parse AI response: %s", content[:120])
+            return AISignal(Signal.HOLD, "LOW", "unparseable response")
 
     raw_decision = data.get("decision", "HOLD").upper()
     signal = Signal[raw_decision] if raw_decision in Signal.__members__ else Signal.HOLD
