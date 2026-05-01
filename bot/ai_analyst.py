@@ -1,6 +1,8 @@
 import json
 import re
 import ast
+import time
+import threading
 import logging
 import pandas as pd
 import httpx
@@ -219,6 +221,12 @@ def _parse_response(content: str) -> AISignal:
 # LLM provider calls (Groq primary, Gemini fallback)
 # ---------------------------------------------------------------------------
 
+# Gemini rate limiter — free tier is 15 RPM = 1 call every 4 seconds
+_gemini_lock = threading.Lock()
+_gemini_last_call: float = 0.0
+_GEMINI_MIN_INTERVAL = 4.1  # slightly over 4s to stay safely under 15 RPM
+
+
 def _call_groq(prompt: str, max_tokens: int = 150) -> str:
     client = Groq(api_key=GROQ_API_KEY)
     response = client.chat.completions.create(
@@ -234,6 +242,13 @@ def _call_groq(prompt: str, max_tokens: int = 150) -> str:
 
 
 def _call_gemini(prompt: str) -> str:
+    global _gemini_last_call
+    with _gemini_lock:
+        wait = _GEMINI_MIN_INTERVAL - (time.time() - _gemini_last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _gemini_last_call = time.time()
+
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
