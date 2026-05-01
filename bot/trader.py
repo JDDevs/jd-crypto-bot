@@ -1,7 +1,7 @@
 import time
 import logging
 import ccxt
-from config import SYMBOLS, TIMEFRAME, LOOP_SLEEP
+from config import SYMBOLS, TIMEFRAME, LOOP_SLEEP, AI_HOLD_CHECK_INTERVAL, AI_HOLD_PRICE_MOVE
 from bot.exchange import (
     fetch_candles, fetch_balance, fetch_ticker,
     place_market_order,
@@ -29,6 +29,8 @@ class Trader:
     def __init__(self, exchange: ccxt.Exchange):
         self.exchange = exchange
         self.state = state_mod.load()
+        self._last_ai_check: dict[str, float] = {}   # symbol → timestamp of last in-position AI call
+        self._last_ai_price: dict[str, float] = {}   # symbol → price at last in-position AI call
         removed = state_mod.cleanup_orphans(self.state, SYMBOLS)
         if removed:
             log.info("Cleaned up %d orphan pair(s) no longer in SYMBOLS", removed)
@@ -134,19 +136,30 @@ class Trader:
             self._close_trade(symbol, setup, current_price, reason)
             return
 
-        # Only consult AI for early exit if rule-based indicators suggest bearish
-        rule = evaluate(df)
-        if rule.signal == Signal.SELL:
+        # Active AI monitoring — check every AI_HOLD_CHECK_INTERVAL seconds
+        # or whenever price moves AI_HOLD_PRICE_MOVE from the last consulted price
+        now = time.time()
+        last_check = self._last_ai_check.get(symbol, 0)
+        last_price = self._last_ai_price.get(symbol, current_price)
+        time_elapsed = (now - last_check) >= AI_HOLD_CHECK_INTERVAL
+        price_moved = abs(current_price - last_price) / last_price >= AI_HOLD_PRICE_MOVE
+
+        if time_elapsed or price_moved:
+            log.info("[%s IN-POSITION] Consulting AI (elapsed=%ds, Δprice=%.3f%%)",
+                     symbol, int(now - last_check),
+                     abs(current_price - last_price) / last_price * 100)
             ai = analyse(df, symbol, self.state["pairs"][symbol])
             state_mod.record_ai_signal(self.state, symbol, ai.signal.value, ai.confidence, ai.reasoning)
             state_mod.save(self.state)
+            self._last_ai_check[symbol] = now
+            self._last_ai_price[symbol] = current_price
             if ai.signal == Signal.SELL and is_actionable(ai):
                 self._close_trade(symbol, setup, current_price, f"AI_SELL ({ai.confidence})")
                 return
 
         log.info(
-            "[%s HOLD TRADE] price=%.4f TP=%.4f SL=%.4f",
-            symbol, current_price, setup.take_profit, setup.stop_loss,
+            "[%s HOLD TRADE] price=%.4f TP=%.4f SL=%.4f trailing_peak=%.4f",
+            symbol, current_price, setup.take_profit, setup.stop_loss, highest,
         )
 
     def _close_trade(self, symbol: str, setup: TradeSetup, price: float, reason: str) -> None:

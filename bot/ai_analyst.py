@@ -199,19 +199,24 @@ def _call_gemini(prompt: str) -> str:
 
 
 def _call_llm(prompt: str, max_tokens: int = 150) -> tuple[str, str]:
-    """Returns (content, provider_name). Tries Groq first, falls back to Gemini."""
+    """Returns (content, provider_name). Tries Gemini first, falls back to Groq."""
+    if GEMINI_API_KEY:
+        try:
+            return _call_gemini(prompt), "GEMINI"
+        except httpx.HTTPStatusError as e:
+            log.warning("Gemini HTTP %s — switching to Groq fallback", e.response.status_code)
+        except Exception as e:
+            log.warning("Gemini error: %s — switching to Groq fallback", e)
+
     if GROQ_API_KEY:
         try:
             return _call_groq(prompt, max_tokens), "GROQ"
         except GroqRateLimitError:
-            log.warning("Groq rate limit hit — switching to Gemini fallback")
+            log.warning("Groq rate limit hit — no fallback available")
         except Exception as e:
-            log.warning("Groq error: %s — switching to Gemini fallback", e)
+            log.warning("Groq error: %s", e)
 
-    if GEMINI_API_KEY:
-        return _call_gemini(prompt), "GEMINI"
-
-    raise RuntimeError("No AI provider available. Set GROQ_API_KEY or GEMINI_API_KEY in .env")
+    raise RuntimeError("No AI provider available. Set GEMINI_API_KEY or GROQ_API_KEY in .env")
 
 
 # ---------------------------------------------------------------------------
