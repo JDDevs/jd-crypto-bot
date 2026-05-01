@@ -285,5 +285,63 @@ def reflect(symbol: str, closed_trade: dict) -> str:
         return ""
 
 
-def is_actionable(ai_signal: AISignal) -> bool:
-    return CONFIDENCE_RANK.get(ai_signal.confidence, 0) >= CONFIDENCE_RANK.get(AI_CONFIDENCE_THRESHOLD, 1)
+def is_actionable(ai_signal: AISignal, threshold: str | None = None) -> bool:
+    t = threshold if threshold else AI_CONFIDENCE_THRESHOLD
+    return CONFIDENCE_RANK.get(ai_signal.confidence, 0) >= CONFIDENCE_RANK.get(t, 1)
+
+
+# ---------------------------------------------------------------------------
+# Macro sentiment — overall market outlook (called once per hour)
+# ---------------------------------------------------------------------------
+
+_MACRO_PROMPT = """You are analyzing the overall crypto market environment for scalp trading.
+
+## Multi-pair overview (latest AI signals)
+{symbol_lines}
+
+## Fear & Greed Index: {fg_value} ({fg_label})
+
+Is the current market FAVORABLE, NEUTRAL, or UNFAVORABLE for opening new LONG (BUY) positions?
+
+Rules:
+- FAVORABLE: majority of pairs bullish, healthy Fear&Greed (25-75)
+- UNFAVORABLE: majority bearish, extreme fear (<20) or extreme greed (>80), no clear direction
+- NEUTRAL: mixed signals — proceed with caution
+
+Respond ONLY with this JSON (no markdown):
+{{"outlook": "FAVORABLE|NEUTRAL|UNFAVORABLE", "reasoning": "one concise sentence"}}"""
+
+
+def macro_analysis(symbol_data: dict, fear_greed: int) -> tuple[str, str]:
+    """Returns (outlook, reasoning). outlook is FAVORABLE | NEUTRAL | UNFAVORABLE."""
+    fg_label = (
+        "Extreme Fear" if fear_greed < 25 else
+        "Fear"         if fear_greed < 45 else
+        "Neutral"      if fear_greed < 55 else
+        "Greed"        if fear_greed < 75 else "Extreme Greed"
+    )
+    lines = [
+        f"- {sym}: signal={d['last_signal']} ({d['last_confidence']}) price={d['last_price']:.4f}"
+        for sym, d in symbol_data.items()
+    ]
+    prompt = _MACRO_PROMPT.format(
+        symbol_lines="\n".join(lines),
+        fg_value=fear_greed,
+        fg_label=fg_label,
+    )
+    try:
+        content, provider = _call_llm(prompt, max_tokens=80)
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        data = json.loads(content.strip())
+        outlook = data.get("outlook", "NEUTRAL").upper()
+        if outlook not in ("FAVORABLE", "NEUTRAL", "UNFAVORABLE"):
+            outlook = "NEUTRAL"
+        reasoning = data.get("reasoning", "")
+        log.info("[MACRO/%s] %s — %s", provider, outlook, reasoning)
+        return outlook, reasoning
+    except Exception as e:
+        log.warning("[MACRO] Failed: %s", e)
+        return "NEUTRAL", ""

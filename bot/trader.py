@@ -1,17 +1,26 @@
 import time
 import logging
+import httpx
 import ccxt
+from datetime import datetime, timezone
 from config import (
     SYMBOLS, TIMEFRAME, LOOP_SLEEP,
     AI_HOLD_CHECK_INTERVAL, AI_HOLD_PRICE_MOVE,
     RE_ENTRY_COOLDOWN, RE_ENTRY_PRICE_BUFFER,
+    MAX_OPEN_TRADES,
+    VOLUME_FILTER_ENABLED, VOLUME_FILTER_PERIODS, VOLUME_FILTER_MULT,
+    VWAP_FILTER_ENABLED,
+    TRADING_BLACKOUT_ENABLED, BLACKOUT_START, BLACKOUT_END,
+    FEAR_GREED_ENABLED, FEAR_GREED_MIN, FEAR_GREED_MAX, FEAR_GREED_TTL,
+    SLIPPAGE_WARN_PCT,
+    MACRO_CHECK_INTERVAL,
 )
 from bot.exchange import (
     fetch_candles, fetch_balance, fetch_ticker,
     place_market_order,
 )
 from bot.strategy import Signal, evaluate
-from bot.ai_analyst import analyse, reflect, is_actionable
+from bot.ai_analyst import analyse, reflect, is_actionable, macro_analysis
 from bot.risk import build_trade_setup, should_exit, TradeSetup
 from bot import state as state_mod
 from bot import notifier
@@ -36,6 +45,10 @@ class Trader:
         self._last_ai_check: dict[str, float] = {}   # symbol → timestamp of last in-position AI call
         self._last_ai_price: dict[str, float] = {}   # symbol → price at last in-position AI call
         self._last_close: dict[str, dict] = {}        # symbol → {"time": float, "price": float}
+        self._fear_greed_value: int = 50              # cached Fear & Greed index (50 = neutral)
+        self._fear_greed_last: float = 0
+        self._macro_outlook: str = "NEUTRAL"
+        self._macro_last_check: float = 0
         removed = state_mod.cleanup_orphans(self.state, SYMBOLS)
         if removed:
             log.info("Cleaned up %d orphan pair(s) no longer in SYMBOLS", removed)
@@ -48,13 +61,14 @@ class Trader:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        log.info("Bot started — pairs=%s timeframe=%s model=groq", SYMBOLS, TIMEFRAME)
+        log.info("Bot started — pairs=%s timeframe=%s", SYMBOLS, TIMEFRAME)
         while True:
             try:
                 balance = fetch_balance(self.exchange, "USDT")
                 state_mod.record_balance(self.state, balance)
             except Exception:
                 pass
+            self._update_macro()
             for symbol in SYMBOLS:
                 try:
                     self._tick(symbol)
@@ -68,6 +82,46 @@ class Trader:
                 except Exception as e:
                     log.exception("[%s] Unexpected error: %s", symbol, e)
             time.sleep(LOOP_SLEEP)
+
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
+
+    def _count_open_trades(self) -> int:
+        return sum(1 for p in self.state["pairs"].values() if p.get("open_trade"))
+
+    def _get_fear_greed(self) -> int:
+        now = time.time()
+        if now - self._fear_greed_last > FEAR_GREED_TTL:
+            try:
+                resp = httpx.get("https://api.alternative.me/fng/?limit=1", timeout=5)
+                self._fear_greed_value = int(resp.json()["data"][0]["value"])
+                self._fear_greed_last = now
+                log.info("Fear & Greed index: %d", self._fear_greed_value)
+            except Exception as e:
+                log.warning("Fear & Greed fetch failed: %s", e)
+        return self._fear_greed_value
+
+    def _update_macro(self) -> None:
+        now = time.time()
+        if now - self._macro_last_check < MACRO_CHECK_INTERVAL:
+            return
+        try:
+            symbol_data = {}
+            for sym in SYMBOLS:
+                pair = self.state["pairs"].get(sym, {})
+                ph = pair.get("price_history", [])
+                sig = pair.get("last_ai_signal") or {}
+                symbol_data[sym] = {
+                    "last_price":      ph[-1]["p"] if ph else 0,
+                    "last_signal":     sig.get("decision", "HOLD"),
+                    "last_confidence": sig.get("confidence", "LOW"),
+                }
+            outlook, reasoning = macro_analysis(symbol_data, self._fear_greed_value)
+            self._macro_outlook = outlook
+            self._macro_last_check = now
+        except Exception as e:
+            log.warning("Macro update failed: %s", e)
 
     # ------------------------------------------------------------------
     # Per-symbol iteration
@@ -92,31 +146,71 @@ class Trader:
             log.debug("[%s] Rule-based HOLD — no AI call needed", symbol)
             return
 
-        # Re-entry protection (only matters for BUY signals after a recent close)
         current_price = df.iloc[-1]["close"]
+
+        # --- Gate 1: max concurrent positions ---
+        if self._count_open_trades() >= MAX_OPEN_TRADES:
+            log.debug("[%s] Max open trades (%d) reached", symbol, MAX_OPEN_TRADES)
+            return
+
+        # --- Gate 2: trading hours blackout ---
+        if TRADING_BLACKOUT_ENABLED:
+            hour = datetime.now(timezone.utc).hour
+            in_blackout = (hour >= BLACKOUT_START or hour < BLACKOUT_END)
+            if in_blackout:
+                log.debug("[%s BLACKOUT] UTC %02d:xx — no new entries", symbol, hour)
+                return
+
+        # --- Gate 3: re-entry protection ---
         last_close = self._last_close.get(symbol)
         if last_close:
             elapsed = time.time() - last_close["time"]
-            # Layer A: hard cooldown
             if elapsed < RE_ENTRY_COOLDOWN:
                 log.info("[%s COOLDOWN] %.0fs since last close (need %ds) — skipping",
                          symbol, elapsed, RE_ENTRY_COOLDOWN)
                 return
-            # Layer C: price-distance block — don't chase price above exit
-            exit_price = last_close["price"]
-            if current_price > exit_price * (1 + RE_ENTRY_PRICE_BUFFER):
+            if current_price > last_close["price"] * (1 + RE_ENTRY_PRICE_BUFFER):
                 log.info("[%s PRICE-BLOCK] price=%.4f > exit=%.4f+%.1f%% — won't chase",
-                         symbol, current_price, exit_price, RE_ENTRY_PRICE_BUFFER * 100)
+                         symbol, current_price, last_close["price"], RE_ENTRY_PRICE_BUFFER * 100)
                 return
 
-        # Indicators see a potential signal → ask the AI for confirmation
+        # --- Gate 4: volume filter ---
+        if VOLUME_FILTER_ENABLED and len(df) > VOLUME_FILTER_PERIODS + 1:
+            vol_avg = df["volume"].iloc[-(VOLUME_FILTER_PERIODS + 1):-1].mean()
+            if df.iloc[-1]["volume"] < vol_avg * VOLUME_FILTER_MULT:
+                log.debug("[%s VOL-FILTER] vol=%.2f < avg=%.2f — skipping",
+                          symbol, df.iloc[-1]["volume"], vol_avg)
+                return
+
+        # --- Gate 5: VWAP filter (only BUY above session VWAP) ---
+        if VWAP_FILTER_ENABLED and rule.signal == Signal.BUY:
+            typical = (df["high"] + df["low"] + df["close"]) / 3
+            vwap = (typical * df["volume"]).sum() / df["volume"].sum()
+            if current_price < vwap:
+                log.debug("[%s VWAP-FILTER] price=%.4f < VWAP=%.4f — skipping", symbol, current_price, vwap)
+                return
+
+        # --- Gate 6: Fear & Greed index ---
+        if FEAR_GREED_ENABLED and rule.signal == Signal.BUY:
+            fg = self._get_fear_greed()
+            if fg < FEAR_GREED_MIN:
+                log.info("[%s FG-FILTER] Fear&Greed=%d (Extreme Fear) — no BUY", symbol, fg)
+                return
+            if fg > FEAR_GREED_MAX:
+                log.info("[%s FG-FILTER] Fear&Greed=%d (Extreme Greed) — no BUY", symbol, fg)
+                return
+
+        # Macro outlook → tighten confidence threshold when market looks bad
+        effective_threshold = "HIGH" if self._macro_outlook == "UNFAVORABLE" else None
+
+        # All gates passed → ask the AI for confirmation
         log.info("[%s] Rule signal=%s RSI=%.1f — consulting AI...", symbol, rule.signal.value, rule.rsi)
         ai = analyse(df, symbol, pair_state)
         state_mod.record_ai_signal(self.state, symbol, ai.signal.value, ai.confidence, ai.reasoning)
         state_mod.save(self.state)
 
-        if ai.signal == Signal.BUY and is_actionable(ai):
-            self._open_trade(symbol, df.iloc[-1]["close"], ai.reasoning, ai.confidence, rule.trigger)
+        if ai.signal == Signal.BUY and is_actionable(ai, effective_threshold):
+            self._open_trade(symbol, current_price, ai.reasoning, ai.confidence, rule.trigger)
         elif ai.signal == Signal.SELL and is_actionable(ai):
             log.info("[%s SKIP SELL] No open position to close.", symbol)
         else:
@@ -132,7 +226,14 @@ class Trader:
         allocated = balance / max(len(SYMBOLS), 1)
         setup = build_trade_setup(allocated, price)
         log.info("[%s BUY] %s | Reason: %s", symbol, setup, reasoning)
-        place_market_order(self.exchange, symbol, "buy", setup.quantity)
+        order = place_market_order(self.exchange, symbol, "buy", setup.quantity)
+
+        # Slippage detection
+        fill_price = float(order.get("average") or order.get("price") or price)
+        slippage = abs(fill_price - price) / price
+        if slippage > SLIPPAGE_WARN_PCT:
+            log.warning("[%s] High slippage: signal=%.4f fill=%.4f (%.3f%%)",
+                        symbol, price, fill_price, slippage * 100)
 
         state_mod.record_open(self.state, symbol, setup, reasoning)
         state_mod.save(self.state)
