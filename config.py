@@ -44,8 +44,8 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 AI_CONFIDENCE_THRESHOLD = os.getenv("AI_CONFIDENCE_THRESHOLD", "LOW")  # LOW | MEDIUM | HIGH
 
 # Active AI monitoring while in an open position
-AI_HOLD_CHECK_INTERVAL = int(os.getenv("AI_HOLD_CHECK_INTERVAL", "180"))   # seconds between checks
-AI_HOLD_PRICE_MOVE = float(os.getenv("AI_HOLD_PRICE_MOVE", "0.001"))       # also trigger on 0.1% move
+AI_HOLD_CHECK_INTERVAL = int(os.getenv("AI_HOLD_CHECK_INTERVAL", "300"))   # seconds between checks
+AI_HOLD_PRICE_MOVE = float(os.getenv("AI_HOLD_PRICE_MOVE", "0.003"))       # also trigger on 0.3% move
 
 # Re-entry protection — prevents FOMO re-buys near the last exit price
 RE_ENTRY_COOLDOWN = int(os.getenv("RE_ENTRY_COOLDOWN", "300"))              # 5-min hard cooldown
