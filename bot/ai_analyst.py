@@ -9,6 +9,7 @@ from config import (
     GROQ_API_KEY, GROQ_MODEL,
     GEMINI_API_KEY, GEMINI_MODEL,
     AI_CONFIDENCE_THRESHOLD, TIMEFRAME,
+    RE_ENTRY_AI_WINDOW,
 )
 
 log = logging.getLogger(__name__)
@@ -112,6 +113,31 @@ def _build_memory_section(pair_state: dict | None) -> str:
         last_lessons = lessons[-8:]
         lines = [f"- {l['lesson']}" for l in last_lessons]
         parts.append("\n## Lessons You've Learned (apply when relevant)\n" + "\n".join(lines))
+
+    # Layer B: recent-exit warning — inject if closed within RE_ENTRY_AI_WINDOW seconds
+    if closed:
+        last_trade = closed[-1]
+        closed_at = last_trade.get("closed_at", "")
+        if closed_at:
+            try:
+                from datetime import datetime, timezone
+                closed_time = datetime.fromisoformat(closed_at)
+                elapsed_s = (datetime.now(timezone.utc) - closed_time).total_seconds()
+                if 0 < elapsed_s < RE_ENTRY_AI_WINDOW:
+                    mins = int(elapsed_s / 60)
+                    exit_p = last_trade.get("exit_price", 0)
+                    exit_pnl = last_trade.get("pnl", 0)
+                    exit_reason = last_trade.get("exit_reason", "")
+                    parts.append(
+                        f"\n## ⚠️ RECENT EXIT — {mins} min ago\n"
+                        f"- You closed this pair {mins} min ago at {exit_p:.4f} USDT "
+                        f"(PnL: {exit_pnl:+.4f}, reason: {exit_reason})\n"
+                        f"- DO NOT re-enter if price is still near or above your exit price.\n"
+                        f"- Only consider BUY if price has pulled back significantly "
+                        f"or a clearly new setup has formed."
+                    )
+            except Exception:
+                pass
 
     return "\n".join(parts) + ("\n" if parts else "")
 

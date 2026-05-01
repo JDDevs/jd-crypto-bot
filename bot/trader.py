@@ -1,7 +1,11 @@
 import time
 import logging
 import ccxt
-from config import SYMBOLS, TIMEFRAME, LOOP_SLEEP, AI_HOLD_CHECK_INTERVAL, AI_HOLD_PRICE_MOVE
+from config import (
+    SYMBOLS, TIMEFRAME, LOOP_SLEEP,
+    AI_HOLD_CHECK_INTERVAL, AI_HOLD_PRICE_MOVE,
+    RE_ENTRY_COOLDOWN, RE_ENTRY_PRICE_BUFFER,
+)
 from bot.exchange import (
     fetch_candles, fetch_balance, fetch_ticker,
     place_market_order,
@@ -31,6 +35,7 @@ class Trader:
         self.state = state_mod.load()
         self._last_ai_check: dict[str, float] = {}   # symbol → timestamp of last in-position AI call
         self._last_ai_price: dict[str, float] = {}   # symbol → price at last in-position AI call
+        self._last_close: dict[str, dict] = {}        # symbol → {"time": float, "price": float}
         removed = state_mod.cleanup_orphans(self.state, SYMBOLS)
         if removed:
             log.info("Cleaned up %d orphan pair(s) no longer in SYMBOLS", removed)
@@ -86,6 +91,23 @@ class Trader:
         if rule.signal == Signal.HOLD:
             log.debug("[%s] Rule-based HOLD — no AI call needed", symbol)
             return
+
+        # Re-entry protection (only matters for BUY signals after a recent close)
+        current_price = df.iloc[-1]["close"]
+        last_close = self._last_close.get(symbol)
+        if last_close:
+            elapsed = time.time() - last_close["time"]
+            # Layer A: hard cooldown
+            if elapsed < RE_ENTRY_COOLDOWN:
+                log.info("[%s COOLDOWN] %.0fs since last close (need %ds) — skipping",
+                         symbol, elapsed, RE_ENTRY_COOLDOWN)
+                return
+            # Layer C: price-distance block — don't chase price above exit
+            exit_price = last_close["price"]
+            if current_price > exit_price * (1 + RE_ENTRY_PRICE_BUFFER):
+                log.info("[%s PRICE-BLOCK] price=%.4f > exit=%.4f+%.1f%% — won't chase",
+                         symbol, current_price, exit_price, RE_ENTRY_PRICE_BUFFER * 100)
+                return
 
         # Indicators see a potential signal → ask the AI for confirmation
         log.info("[%s] Rule signal=%s RSI=%.1f — consulting AI...", symbol, rule.signal.value, rule.rsi)
@@ -169,6 +191,7 @@ class Trader:
         pnl = (price - setup.entry_price) * setup.quantity
         closed = state_mod.record_close(self.state, symbol, price, setup.quantity, pnl, reason)
         state_mod.save(self.state)
+        self._last_close[symbol] = {"time": time.time(), "price": price}
 
         stats = self.state["pairs"][symbol]["stats"]
         total = state_mod.total_pnl(self.state)
