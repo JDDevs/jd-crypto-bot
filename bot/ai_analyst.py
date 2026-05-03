@@ -374,8 +374,19 @@ Responde SIEMPRE en español, de forma directa y clara, sin tecnicismos innecesa
 Cuando expliques por qué el bot no ha invertido, analiza cada filtro y condición con detalle."""
 
 
-def _call_llm_chat(prompt: str) -> tuple[str, str]:
-    """LLM call with the conversational system prompt and higher token budget."""
+def _call_llm_chat(
+    user_message: str,
+    state_context: str,
+    history: list[dict],
+) -> tuple[str, str]:
+    """Multi-turn LLM call with conversational system prompt and full history.
+
+    history is a list of {"role": "user"|"assistant", "content": str} dicts
+    ordered oldest → newest (not including the current user_message).
+    state_context is injected into the system prompt so it's always fresh.
+    """
+    system = f"{_CHAT_SYSTEM}\n\n## Estado actual del bot\n{state_context}"
+
     if GEMINI_API_KEY:
         try:
             global _gemini_last_call
@@ -388,9 +399,15 @@ def _call_llm_chat(prompt: str) -> tuple[str, str]:
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
             )
+            # Build multi-turn contents array for Gemini
+            contents: list[dict] = []
+            for h in history:
+                role = "model" if h["role"] == "assistant" else "user"
+                contents.append({"role": role, "parts": [{"text": h["content"]}]})
+            contents.append({"role": "user", "parts": [{"text": user_message}]})
             body = {
-                "system_instruction": {"parts": [{"text": _CHAT_SYSTEM}]},
-                "contents": [{"parts": [{"text": prompt}]}],
+                "system_instruction": {"parts": [{"text": system}]},
+                "contents": contents,
                 "generationConfig": {"temperature": 0.7, "maxOutputTokens": 500},
             }
             resp = httpx.post(url, json=body, timeout=30)
@@ -402,12 +419,14 @@ def _call_llm_chat(prompt: str) -> tuple[str, str]:
     if GROQ_API_KEY:
         try:
             client = Groq(api_key=GROQ_API_KEY)
+            # Build multi-turn messages array for Groq
+            messages: list[dict] = [{"role": "system", "content": system}]
+            for h in history:
+                messages.append({"role": h["role"], "content": h["content"]})
+            messages.append({"role": "user", "content": user_message})
             response = client.chat.completions.create(
                 model=GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": _CHAT_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ],
+                messages=messages,
                 temperature=0.7,
                 max_tokens=500,
             )
@@ -474,19 +493,19 @@ def _build_chat_context(snapshot: dict) -> str:
     return "\n".join(lines)
 
 
-def chat(question: str, snapshot: dict) -> str:
-    """Answer a free-form question about the bot's state and decisions."""
+def chat(
+    question: str,
+    snapshot: dict,
+    history: list[dict] | None = None,
+) -> str:
+    """Answer a free-form question with optional multi-turn conversation history.
+
+    history: list of {"role": "user"|"assistant", "content": str} ordered
+             oldest → newest, NOT including the current question.
+    """
     context = _build_chat_context(snapshot)
-    prompt = (
-        f"## Estado actual del bot\n{context}\n"
-        f"## Pregunta del usuario\n{question}\n\n"
-        "Responde en español de forma útil y directa. "
-        "Si la pregunta es sobre por qué el bot no ha invertido, "
-        "analiza cada filtro activo, las condiciones del mercado "
-        "y da una explicación específica para cada par."
-    )
     try:
-        content, provider = _call_llm_chat(prompt)
+        content, provider = _call_llm_chat(question, context, history or [])
         log.info("[CHAT/%s] Q: %s", provider, question[:60])
         return content.strip()
     except Exception as e:

@@ -26,12 +26,17 @@ from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_ENABLED
 log = logging.getLogger(__name__)
 _API = "https://api.telegram.org/bot{token}/{method}"
 
+_MAX_HISTORY_TURNS = 6    # keep last 6 exchanges (12 messages) in memory
+_HISTORY_IDLE_SECS = 1800  # reset conversation after 30 min of inactivity
+
 
 class TelegramListener:
     def __init__(self, trader=None) -> None:
         self._trader = trader
         self._offset: int = 0
         self._client = httpx.Client(timeout=45)
+        self._history: list[dict] = []   # {"role": "user"|"assistant", "content": str}
+        self._last_activity: float = 0.0
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -107,6 +112,8 @@ class TelegramListener:
             self._cmd_market()
         elif low.startswith("/reporte") or low.startswith("/report"):
             self._cmd_report()
+        elif low.startswith("/limpiar") or low.startswith("/reset") or low.startswith("/clear"):
+            self._cmd_clear()
         elif low.startswith("/"):
             self._send("Comando desconocido. Escribe /ayuda para ver los disponibles.")
         else:
@@ -125,8 +132,9 @@ class TelegramListener:
             "*/porque* — ¿Por qué no ha invertido? (análisis con IA)\n"
             "*/mercado* — Resumen del mercado actual\n"
             "*/reporte* — Generar reporte ahora\n"
+            "*/limpiar* — Borrar el historial de conversación\n"
             "*/ayuda* — Esta ayuda\n\n"
-            "_También puedes escribirme en lenguaje natural y te respondo con IA._\n\n"
+            "💬 _Escríbeme en lenguaje natural y recuerdo el contexto de la conversación._\n\n"
             "*Ejemplos de /set:*\n"
             "`/set AI_CONFIDENCE_THRESHOLD MEDIUM`\n"
             "`/set FEAR_GREED_MIN 15`\n"
@@ -195,10 +203,31 @@ class TelegramListener:
         from bot import notifier, state as state_mod
         notifier.notify_report(state_mod.load())
 
+    def _cmd_clear(self) -> None:
+        self._history = []
+        self._last_activity = 0.0
+        self._send("🧹 Historial de conversación borrado. Empezamos de cero.")
+
     def _cmd_chat(self, text: str) -> None:
         from bot.ai_analyst import chat
+
+        now = time.time()
+        # Reset history after prolonged inactivity
+        if self._history and now - self._last_activity > _HISTORY_IDLE_SECS:
+            self._history = []
+            self._send("_(La conversación anterior expiró por inactividad — nueva sesión)_")
+        self._last_activity = now
+
         try:
-            response = chat(text, self._build_snapshot())
+            response = chat(text, self._build_snapshot(), self._history)
+
+            # Append this exchange to history and trim to the cap
+            self._history.append({"role": "user", "content": text})
+            self._history.append({"role": "assistant", "content": response})
+            max_msgs = _MAX_HISTORY_TURNS * 2
+            if len(self._history) > max_msgs:
+                self._history = self._history[-max_msgs:]
+
             self._send(response)
         except Exception as e:
             log.warning("_cmd_chat error: %s", e)
