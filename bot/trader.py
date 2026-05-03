@@ -5,16 +5,13 @@ import ccxt
 from datetime import datetime, timezone
 from config import (
     SYMBOLS, TIMEFRAME, LOOP_SLEEP,
-    AI_HOLD_CHECK_INTERVAL, AI_HOLD_PRICE_MOVE,
-    RE_ENTRY_COOLDOWN, RE_ENTRY_PRICE_BUFFER,
-    MAX_OPEN_TRADES,
-    VOLUME_FILTER_ENABLED, VOLUME_FILTER_PERIODS, VOLUME_FILTER_MULT,
-    VWAP_FILTER_ENABLED,
-    TRADING_BLACKOUT_ENABLED, BLACKOUT_START, BLACKOUT_END,
-    FEAR_GREED_ENABLED, FEAR_GREED_MIN, FEAR_GREED_MAX, FEAR_GREED_TTL,
+    AI_HOLD_PRICE_MOVE,
+    VOLUME_FILTER_PERIODS,
+    FEAR_GREED_TTL,
     SLIPPAGE_WARN_PCT,
     MACRO_CHECK_INTERVAL,
 )
+import bot.runtime_config as rc
 from bot.exchange import (
     fetch_candles, fetch_balance, fetch_ticker,
     place_market_order,
@@ -149,55 +146,105 @@ class Trader:
         current_price = df.iloc[-1]["close"]
 
         # --- Gate 1: max concurrent positions ---
-        if self._count_open_trades() >= MAX_OPEN_TRADES:
-            log.debug("[%s] Max open trades (%d) reached", symbol, MAX_OPEN_TRADES)
+        max_trades = int(rc.get("MAX_OPEN_TRADES"))
+        open_count = self._count_open_trades()
+        if open_count >= max_trades:
+            log.debug("[%s] Max open trades (%d) reached", symbol, max_trades)
+            state_mod.record_skip_reason(
+                self.state, symbol, "MAX_OPEN_TRADES",
+                f"{open_count}/{max_trades} posiciones abiertas",
+            )
+            state_mod.save(self.state)
             return
 
         # --- Gate 2: trading hours blackout ---
-        if TRADING_BLACKOUT_ENABLED:
+        if rc.get("TRADING_BLACKOUT_ENABLED"):
             hour = datetime.now(timezone.utc).hour
-            in_blackout = (hour >= BLACKOUT_START or hour < BLACKOUT_END)
+            bs = int(rc.get("BLACKOUT_START"))
+            be = int(rc.get("BLACKOUT_END"))
+            in_blackout = (hour >= bs or hour < be)
             if in_blackout:
                 log.debug("[%s BLACKOUT] UTC %02d:xx — no new entries", symbol, hour)
+                state_mod.record_skip_reason(
+                    self.state, symbol, "BLACKOUT",
+                    f"UTC {hour:02d}:xx (bloqueo {bs:02d}:00–{be:02d}:00)",
+                )
+                state_mod.save(self.state)
                 return
 
         # --- Gate 3: re-entry protection ---
         last_close = self._last_close.get(symbol)
         if last_close:
             elapsed = time.time() - last_close["time"]
-            if elapsed < RE_ENTRY_COOLDOWN:
+            cooldown = int(rc.get("RE_ENTRY_COOLDOWN"))
+            if elapsed < cooldown:
                 log.info("[%s COOLDOWN] %.0fs since last close (need %ds) — skipping",
-                         symbol, elapsed, RE_ENTRY_COOLDOWN)
+                         symbol, elapsed, cooldown)
+                state_mod.record_skip_reason(
+                    self.state, symbol, "COOLDOWN",
+                    f"{elapsed:.0f}s desde último cierre (necesita {cooldown}s)",
+                )
+                state_mod.save(self.state)
                 return
-            if current_price > last_close["price"] * (1 + RE_ENTRY_PRICE_BUFFER):
+            buf = float(rc.get("RE_ENTRY_PRICE_BUFFER"))
+            if current_price > last_close["price"] * (1 + buf):
                 log.info("[%s PRICE-BLOCK] price=%.4f > exit=%.4f+%.1f%% — won't chase",
-                         symbol, current_price, last_close["price"], RE_ENTRY_PRICE_BUFFER * 100)
+                         symbol, current_price, last_close["price"], buf * 100)
+                state_mod.record_skip_reason(
+                    self.state, symbol, "PRECIO_BLOQUEO",
+                    f"precio {current_price:.4f} > salida {last_close['price']:.4f}+{buf*100:.1f}%",
+                )
+                state_mod.save(self.state)
                 return
 
         # --- Gate 4: volume filter ---
-        if VOLUME_FILTER_ENABLED and len(df) > VOLUME_FILTER_PERIODS + 1:
+        if rc.get("VOLUME_FILTER_ENABLED") and len(df) > VOLUME_FILTER_PERIODS + 1:
             vol_avg = df["volume"].iloc[-(VOLUME_FILTER_PERIODS + 1):-1].mean()
-            if df.iloc[-1]["volume"] < vol_avg * VOLUME_FILTER_MULT:
-                log.debug("[%s VOL-FILTER] vol=%.2f < avg=%.2f — skipping",
-                          symbol, df.iloc[-1]["volume"], vol_avg)
+            mult = float(rc.get("VOLUME_FILTER_MULT"))
+            if df.iloc[-1]["volume"] < vol_avg * mult:
+                log.debug("[%s VOL-FILTER] vol=%.2f < avg=%.2f×%.1f — skipping",
+                          symbol, df.iloc[-1]["volume"], vol_avg, mult)
+                state_mod.record_skip_reason(
+                    self.state, symbol, "VOLUMEN",
+                    f"vol={df.iloc[-1]['volume']:.2f} < avg={vol_avg:.2f}×{mult}",
+                )
+                state_mod.save(self.state)
                 return
 
         # --- Gate 5: VWAP filter (only BUY above session VWAP) ---
-        if VWAP_FILTER_ENABLED and rule.signal == Signal.BUY:
+        if rc.get("VWAP_FILTER_ENABLED") and rule.signal == Signal.BUY:
             typical = (df["high"] + df["low"] + df["close"]) / 3
             vwap = (typical * df["volume"]).sum() / df["volume"].sum()
             if current_price < vwap:
-                log.debug("[%s VWAP-FILTER] price=%.4f < VWAP=%.4f — skipping", symbol, current_price, vwap)
+                log.debug("[%s VWAP-FILTER] price=%.4f < VWAP=%.4f — skipping",
+                          symbol, current_price, vwap)
+                state_mod.record_skip_reason(
+                    self.state, symbol, "VWAP",
+                    f"precio {current_price:.4f} < VWAP {vwap:.4f}",
+                )
+                state_mod.save(self.state)
                 return
 
         # --- Gate 6: Fear & Greed index ---
-        if FEAR_GREED_ENABLED and rule.signal == Signal.BUY:
+        if rc.get("FEAR_GREED_ENABLED") and rule.signal == Signal.BUY:
             fg = self._get_fear_greed()
-            if fg < FEAR_GREED_MIN:
+            fg_min = int(rc.get("FEAR_GREED_MIN"))
+            fg_max = int(rc.get("FEAR_GREED_MAX"))
+            if fg < fg_min:
                 log.info("[%s FG-FILTER] Fear&Greed=%d (Extreme Fear) — no BUY", symbol, fg)
+                state_mod.record_skip_reason(
+                    self.state, symbol, "FEAR_GREED",
+                    f"Fear&Greed={fg} < mínimo {fg_min} (Miedo Extremo)",
+                )
+                state_mod.save(self.state)
                 return
-            if fg > FEAR_GREED_MAX:
+            if fg > fg_max:
                 log.info("[%s FG-FILTER] Fear&Greed=%d (Extreme Greed) — no BUY", symbol, fg)
+                state_mod.record_skip_reason(
+                    self.state, symbol, "FEAR_GREED",
+                    f"Fear&Greed={fg} > máximo {fg_max} (Codicia Extrema)",
+                )
+                state_mod.save(self.state)
                 return
 
         # Macro outlook → tighten confidence threshold when market looks bad
@@ -264,7 +311,7 @@ class Trader:
         now = time.time()
         last_check = self._last_ai_check.get(symbol, 0)
         last_price = self._last_ai_price.get(symbol, current_price)
-        time_elapsed = (now - last_check) >= AI_HOLD_CHECK_INTERVAL
+        time_elapsed = (now - last_check) >= int(rc.get("AI_HOLD_CHECK_INTERVAL"))
         price_moved = abs(current_price - last_price) / last_price >= AI_HOLD_PRICE_MOVE
 
         if time_elapsed or price_moved:

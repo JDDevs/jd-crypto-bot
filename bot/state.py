@@ -44,6 +44,7 @@ def ensure_pair(state: dict[str, Any], symbol: str) -> dict[str, Any]:
             "open_trade": None,
             "stats": {"wins": 0, "losses": 0, "total_pnl": 0.0},
             "last_ai_signal": None,
+            "last_skip": None,
             "price_history": [],
             "equity_history": [],
             "closed_trades": [],
@@ -55,6 +56,7 @@ def ensure_pair(state: dict[str, Any], symbol: str) -> dict[str, Any]:
         state["pairs"][symbol].setdefault("equity_history", [])
         state["pairs"][symbol].setdefault("closed_trades", [])
         state["pairs"][symbol].setdefault("lessons_learned", [])
+        state["pairs"][symbol].setdefault("last_skip", None)
     return state["pairs"][symbol]
 
 
@@ -162,6 +164,13 @@ def record_lesson(state: dict[str, Any], symbol: str, lesson: str, max_lessons: 
         "lesson": lesson,
     })
     pair["lessons_learned"] = pair["lessons_learned"][-max_lessons:]
+
+
+def record_skip_reason(state: dict[str, Any], symbol: str,
+                        reason: str, detail: str = "") -> None:
+    """Track why an entry signal was rejected (for diagnostics via Telegram)."""
+    pair = ensure_pair(state, symbol)
+    pair["last_skip"] = {"reason": reason, "detail": detail, "at": _now()}
 
 
 def record_balance(state: dict[str, Any], balance_usdt: float) -> None:

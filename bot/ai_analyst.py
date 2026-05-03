@@ -12,9 +12,10 @@ from bot.strategy import compute_indicators, Signal
 from config import (
     GROQ_API_KEY, GROQ_MODEL,
     GEMINI_API_KEY, GEMINI_MODEL,
-    AI_CONFIDENCE_THRESHOLD, TIMEFRAME,
+    TIMEFRAME,
     RE_ENTRY_AI_WINDOW,
 )
+import bot.runtime_config as rc
 
 log = logging.getLogger(__name__)
 
@@ -337,7 +338,7 @@ def reflect(symbol: str, closed_trade: dict) -> str:
 
 
 def is_actionable(ai_signal: AISignal, threshold: str | None = None) -> bool:
-    t = threshold if threshold else AI_CONFIDENCE_THRESHOLD
+    t = threshold if threshold is not None else str(rc.get("AI_CONFIDENCE_THRESHOLD"))
     return CONFIDENCE_RANK.get(ai_signal.confidence, 0) >= CONFIDENCE_RANK.get(t, 1)
 
 
@@ -363,6 +364,137 @@ Respond ONLY with this JSON (no markdown):
 {{"outlook": "FAVORABLE|NEUTRAL|UNFAVORABLE", "reasoning": "one concise sentence"}}"""
 
 
+# ---------------------------------------------------------------------------
+# Conversational chat — free-form Q&A about bot decisions and market state
+# ---------------------------------------------------------------------------
+
+_CHAT_SYSTEM = """Eres el asistente del JD Crypto Bot, un bot de trading automatizado de criptomonedas.
+Tienes acceso al estado actual del bot, sus últimas señales, filtros activos y configuración.
+Responde SIEMPRE en español, de forma directa y clara, sin tecnicismos innecesarios.
+Cuando expliques por qué el bot no ha invertido, analiza cada filtro y condición con detalle."""
+
+
+def _call_llm_chat(prompt: str) -> tuple[str, str]:
+    """LLM call with the conversational system prompt and higher token budget."""
+    if GEMINI_API_KEY:
+        try:
+            global _gemini_last_call
+            with _gemini_lock:
+                wait = _GEMINI_MIN_INTERVAL - (time.time() - _gemini_last_call)
+                if wait > 0:
+                    time.sleep(wait)
+                _gemini_last_call = time.time()
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            )
+            body = {
+                "system_instruction": {"parts": [{"text": _CHAT_SYSTEM}]},
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 500},
+            }
+            resp = httpx.post(url, json=body, timeout=30)
+            resp.raise_for_status()
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"], "GEMINI"
+        except Exception as e:
+            log.warning("Gemini chat error: %s — trying Groq", e)
+
+    if GROQ_API_KEY:
+        try:
+            client = Groq(api_key=GROQ_API_KEY)
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": _CHAT_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=500,
+            )
+            return response.choices[0].message.content, "GROQ"
+        except Exception as e:
+            log.warning("Groq chat error: %s", e)
+
+    raise RuntimeError("No AI provider available for chat")
+
+
+def _build_chat_context(snapshot: dict) -> str:
+    lines: list[str] = [
+        f"Balance: {snapshot.get('balance', 0):.2f} USDT",
+        f"Hora UTC: {snapshot.get('utc_hour', '?')}:xx",
+        f"Macro outlook: {snapshot.get('macro_outlook', 'NEUTRAL')}",
+        f"Fear & Greed: {snapshot.get('fear_greed', 50)}/100",
+        "",
+    ]
+
+    cfg = rc.all_values()
+    lines.append("### Configuración activa")
+    for k, v in cfg.items():
+        lines.append(f"  {k}: {v}")
+    lines.append("")
+
+    for symbol, data in snapshot.get("pairs", {}).items():
+        lines.append(f"### {symbol}")
+        open_trade = data.get("open_trade")
+        if open_trade:
+            cur = data.get("current_price") or open_trade["entry_price"]
+            unrealized = (cur - open_trade["entry_price"]) * open_trade["quantity"]
+            lines.append(
+                f"  Estado: EN POSICIÓN — entrada {open_trade['entry_price']:.4f} "
+                f"| PnL latente {unrealized:+.4f} USDT"
+            )
+        else:
+            lines.append("  Estado: sin posición abierta")
+
+        sig = data.get("last_ai_signal") or {}
+        if sig:
+            lines.append(
+                f"  Última señal IA ({sig.get('timestamp', '')}): "
+                f"{sig.get('decision')} ({sig.get('confidence')}) — \"{sig.get('reasoning')}\""
+            )
+
+        skip = data.get("last_skip")
+        if skip:
+            lines.append(
+                f"  Último filtro bloqueante ({skip.get('at', '')}): "
+                f"{skip.get('reason')} — {skip.get('detail', '')}"
+            )
+
+        stats = data.get("stats", {})
+        lines.append(
+            f"  Record: {stats.get('wins', 0)}W/{stats.get('losses', 0)}L "
+            f"| PnL par: {stats.get('total_pnl', 0):+.4f} USDT"
+        )
+
+        lessons = data.get("lessons_learned", [])
+        if lessons:
+            lines.append(f"  Última lección: {lessons[-1].get('lesson', '')}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def chat(question: str, snapshot: dict) -> str:
+    """Answer a free-form question about the bot's state and decisions."""
+    context = _build_chat_context(snapshot)
+    prompt = (
+        f"## Estado actual del bot\n{context}\n"
+        f"## Pregunta del usuario\n{question}\n\n"
+        "Responde en español de forma útil y directa. "
+        "Si la pregunta es sobre por qué el bot no ha invertido, "
+        "analiza cada filtro activo, las condiciones del mercado "
+        "y da una explicación específica para cada par."
+    )
+    try:
+        content, provider = _call_llm_chat(prompt)
+        log.info("[CHAT/%s] Q: %s", provider, question[:60])
+        return content.strip()
+    except Exception as e:
+        log.warning("[CHAT] error: %s", e)
+        return "Lo siento, ocurrió un error al procesar tu pregunta. Intenta de nuevo."
+
+
+# ---------------------------------------------------------------------------
 def macro_analysis(symbol_data: dict, fear_greed: int) -> tuple[str, str]:
     """Returns (outlook, reasoning). outlook is FAVORABLE | NEUTRAL | UNFAVORABLE."""
     fg_label = (

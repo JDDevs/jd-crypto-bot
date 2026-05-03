@@ -54,13 +54,20 @@ def start_report_thread(interval_seconds: int = 300) -> None:
     t.start()
 
 
+def start_telegram_listener(trader) -> None:
+    from bot.telegram_bot import TelegramListener
+    TelegramListener(trader).start()
+
+
 def main() -> None:
     setup_logging()
     if DASHBOARD_ENABLED:
         start_dashboard()
     start_report_thread(interval_seconds=3600)  # every hour
     exchange = build_exchange()
-    Trader(exchange).run()
+    trader = Trader(exchange)
+    start_telegram_listener(trader)
+    trader.run()
 
 
 if __name__ == "__main__":
